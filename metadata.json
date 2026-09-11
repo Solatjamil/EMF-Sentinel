@@ -1,0 +1,6 @@
+{
+  "name": "EMF Sentinel",
+  "description": "A sophisticated dark theme electromagnetic field (EMF) scanner widget and radar movement dynamics analyzer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
