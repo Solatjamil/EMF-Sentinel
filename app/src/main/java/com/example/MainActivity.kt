@@ -48,7 +48,6 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -62,13 +61,18 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.toSize
 import kotlinx.coroutines.delay
-import android.view.ViewGroup
-import com.google.android.gms.ads.MobileAds
-import com.google.android.gms.ads.AdRequest
-import com.google.android.gms.ads.AdSize
-import com.google.android.gms.ads.AdView
-import com.google.android.gms.ads.AdListener
-import com.google.android.gms.ads.LoadAdError
+import com.example.ads.AdConsentManager
+import com.example.ads.AnchoredAdaptiveBanner
+import com.example.ads.MobileAdsController
+import com.example.sensors.EmfSensorManager
+import com.example.net.LanDevice
+import com.example.net.NetworkScanner
+import com.example.net.JammingDetector
+import com.example.floorplan.FloorPlanStore
+import com.example.floorplan.FloorPlanMapperDialog
+import com.example.floorplan.floorLabel
+import com.example.floorplan.toSurroundingWalls
+import com.example.floorplan.toTrackingSubjects
 
 enum class Tab {
     SCANNER,
@@ -88,16 +92,36 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // Initialize the Google Mobile Ads SDK
-        try {
-            MobileAds.initialize(this) {}
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
         enableEdgeToEdge()
         setContent {
             var isDarkMode by remember { mutableStateOf(true) }
+
+            // ── Ads pipeline: UMP consent gate → guarded one-time SDK init ──
+            // No ads are initialized or requested while canRequestAds() is false.
+            val activity = this@MainActivity
+            var canRequestAds by remember { mutableStateOf(AdConsentManager.canRequestAds) }
+            var privacyOptionsRequired by remember { mutableStateOf(AdConsentManager.isPrivacyOptionsRequired) }
+            val gatherConsent: () -> Unit = {
+                AdConsentManager.gatherConsent(activity) { canRequest, privacyRequired ->
+                    canRequestAds = canRequest
+                    privacyOptionsRequired = privacyRequired
+                    if (canRequest) {
+                        MobileAdsController.initialize(activity.applicationContext)
+                    }
+                }
+            }
+            LaunchedEffect(Unit) { gatherConsent() }
+            // Refresh consent state on every resume (consent can change in digital
+            // settings; previous-session consent must be honored per UMP guidance).
+            val consentLifecycleOwner = LocalLifecycleOwner.current
+            DisposableEffect(consentLifecycleOwner) {
+                val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                    if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) gatherConsent()
+                }
+                consentLifecycleOwner.lifecycle.addObserver(observer)
+                onDispose { consentLifecycleOwner.lifecycle.removeObserver(observer) }
+            }
+
             MyApplicationTheme(darkTheme = isDarkMode) {
                 var showSplash by remember { mutableStateOf(true) }
                 if (showSplash) {
@@ -105,7 +129,15 @@ class MainActivity : ComponentActivity() {
                 } else {
                     EMFSentinelApp(
                         isDarkMode = isDarkMode,
-                        onToggleTheme = { isDarkMode = !isDarkMode }
+                        onToggleTheme = { isDarkMode = !isDarkMode },
+                        canRequestAds = canRequestAds,
+                        privacyOptionsRequired = privacyOptionsRequired,
+                        onShowPrivacyOptions = {
+                            AdConsentManager.showPrivacyOptionsForm(activity) { canRequest, privacyRequired ->
+                                canRequestAds = canRequest
+                                privacyOptionsRequired = privacyRequired
+                            }
+                        }
                     )
                 }
             }
@@ -381,7 +413,10 @@ fun Greeting(name: String, modifier: Modifier = Modifier) {
 @Composable
 fun EMFSentinelApp(
     isDarkMode: Boolean = true,
-    onToggleTheme: () -> Unit = {}
+    onToggleTheme: () -> Unit = {},
+    canRequestAds: Boolean = false,
+    privacyOptionsRequired: Boolean = false,
+    onShowPrivacyOptions: () -> Unit = {}
 ) {
     var activeTab by remember { mutableStateOf(Tab.SCANNER) }
     var operatorName by remember { mutableStateOf("Core Sentinel") }
@@ -412,32 +447,18 @@ fun EMFSentinelApp(
     // Modal Control
     var showConfigurator by remember { mutableStateOf(false) }
 
-    // Hoisted Bio-Sync tracking subjects: Designated stationary Wi-Fi Router Gateway & stationary nodes
-    var activeSubjects by remember {
-        mutableStateOf(
-            listOf(
-                TrackingSubject(name = "Wi-Fi Router Gateway", type = "Device", offset = Offset(0.20f, 0.25f)),
-                TrackingSubject(name = "Smart TV Node", type = "Device", offset = Offset(0.78f, 0.30f)),
-                TrackingSubject(name = "Workstation Terminal", type = "Device", offset = Offset(0.25f, 0.75f)),
-                TrackingSubject(name = "Primary Operator", type = "Person", offset = Offset(0.52f, 0.50f)),
-                TrackingSubject(name = "Companion (Pet)", type = "Pet", offset = Offset(0.72f, 0.70f))
-            )
-        )
-    }
-
-    var surroundingWalls by remember {
-        mutableStateOf(
-            listOf(
-                SurroundingWall(start = Offset(0.15f, 0.15f), end = Offset(0.85f, 0.15f), name = "North Wall"),
-                SurroundingWall(start = Offset(0.15f, 0.15f), end = Offset(0.15f, 0.85f), name = "West Wall"),
-                SurroundingWall(start = Offset(0.85f, 0.15f), end = Offset(0.85f, 0.85f), name = "East Wall"),
-                SurroundingWall(start = Offset(0.15f, 0.85f), end = Offset(0.85f, 0.85f), name = "South Wall"),
-                SurroundingWall(start = Offset(0.5f, 0.15f), end = Offset(0.5f, 0.45f), name = "Office Partition"),
-                SurroundingWall(start = Offset(0.15f, 0.5f), end = Offset(0.55f, 0.5f), name = "Hallway Divider"),
-                SurroundingWall(start = Offset(0.55f, 0.5f), end = Offset(0.55f, 0.85f), name = "Main Corridor")
-            )
-        )
-    }
+    // Bio-Sync subjects & walls — REAL data only. Populated from:
+    //  • the saved per-story architect floor plan (calibrated walls + placed devices)
+    //  • live Wi-Fi AP scans (estimated RSSI/FSPL placement, labeled as estimates)
+    //  • the LAN device discovery sweep (real IP/MAC/vendor of devices on the network)
+    // Nothing here is fabricated anymore.
+    var activeSubjects by remember { mutableStateOf<List<TrackingSubject>>(emptyList()) }
+    var surroundingWalls by remember { mutableStateOf<List<SurroundingWall>>(emptyList()) }
+    var currentFloor by remember { mutableIntStateOf(0) }
+    var showFloorPlanMapper by remember { mutableStateOf(false) }
+    var lanScanInProgress by remember { mutableStateOf(false) }
+    var lanDevices by remember { mutableStateOf<List<LanDevice>>(emptyList()) }
+    var wifiJamAlert by remember { mutableStateOf(false) }
 
     // WiFi Sensor System Context
     val context = LocalContext.current
@@ -446,6 +467,69 @@ fun EMFSentinelApp(
     var locationPermissionGranted by remember { mutableStateOf(false) }
     var showLocationPermissionDialog by remember { mutableStateOf(false) }
     var wifiScanResults by remember { mutableStateOf<List<ScanResult>>(emptyList()) }
+
+    // ── REAL SENSOR WIRING ───────────────────────────────────────────────
+    // Magnetometer = the actual EMF source. Devices without one get clearly
+    // labeled simulated values (never silently faked).
+    val emfSensor = remember { EmfSensorManager(context) }
+    var latestRealEmf by remember { mutableStateOf<Float?>(null) }
+    var emfIsSimulated by remember { mutableStateOf(!emfSensor.hasMagnetometer) }
+    DisposableEffect(Unit) {
+        emfSensor.start { microTesla ->
+            latestRealEmf = microTesla
+            emfIsSimulated = false
+        }
+        onDispose { emfSensor.stop() }
+    }
+
+    // Per-story architect floor plan persistence + defensive RF jamming monitor
+    val floorPlanStore = remember { FloorPlanStore(context) }
+    val jammingDetector = remember { JammingDetector() }
+
+    // Apply the saved blueprint whenever the building story changes.
+    LaunchedEffect(currentFloor) {
+        val plan = floorPlanStore.load(currentFloor)
+        if (plan != null) {
+            surroundingWalls = plan.toSurroundingWalls()
+            val nonDevices = activeSubjects.filter { it.type != "Device" }
+            activeSubjects = nonDevices + plan.toTrackingSubjects()
+        }
+    }
+
+    // Real LAN device discovery sweep — runs on demand from the Bio-Sync panel.
+    var lanScanTrigger by remember { mutableIntStateOf(0) }
+    LaunchedEffect(lanScanTrigger) {
+        if (lanScanTrigger > 0) {
+            lanScanInProgress = true
+            try {
+                val found = NetworkScanner.scanLocalDevices(context)
+                lanDevices = found
+                // Place newly discovered, not-yet-listed devices near the router
+                // as "UNPLACED" markers — exact room placement is done by dragging
+                // them in the Architect Floor-Plan Mapper.
+                val router = activeSubjects.firstOrNull {
+                    it.type == "Device" && (it.name.contains("📶") || it.name.contains("Router", true))
+                }
+                val anchor = router?.offset ?: Offset(0.5f, 0.3f)
+                val alreadyKnown = activeSubjects.mapNotNull { s -> lanDevices.firstOrNull { d -> s.name.contains(d.ip) }?.ip }
+                found.filter { it.ip !in alreadyKnown && !it.vendor.contains("Router") }.forEachIndexed { idx, dev ->
+                    val angle = idx * 0.9f + 0.4f
+                    val pos = Offset(
+                        (anchor.x + 0.18f * kotlin.math.cos(angle)).coerceIn(0.08f, 0.92f),
+                        (anchor.y + 0.18f * kotlin.math.sin(angle)).coerceIn(0.08f, 0.92f)
+                    )
+                    activeSubjects = activeSubjects + TrackingSubject(
+                        name = "${if (dev.cameraChipsetSuspect) "⚠ " else ""}${dev.vendor} · ${dev.ip}",
+                        type = "Device",
+                        offset = pos
+                    )
+                }
+            } catch (t: Throwable) {
+                t.printStackTrace()
+            }
+            lanScanInProgress = false
+        }
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -544,11 +628,15 @@ fun EMFSentinelApp(
             val currentWifiSubjects = activeSubjects.filter { it.type == "Device" }
             val nextSubjects = activeSubjects.toMutableList()
             wifiScanResults.forEachIndexed { idx, scan ->
-                val nodeLabel = "Wi-Fi AP Node ${idx + 1}"
+                val ssidLabel = scan.SSID?.takeIf { it.isNotBlank() }?.take(12) ?: "AP-${idx + 1}"
+                val nodeLabel = "Wi-Fi AP · $ssidLabel"
                 val alreadyMapped = currentWifiSubjects.any { it.name.contains(nodeLabel) }
                 if (!alreadyMapped && nextSubjects.size < 7) {
                     val angle = (idx * 1.3f + 0.6f) * Math.PI.toFloat()
-                    val distanceRatio = ((100 + scan.level) / 100f).coerceIn(0.25f, 0.75f)
+                    // REAL distance estimate: free-space path loss from measured RSSI+frequency.
+                    // Angles are heuristic (single phone → no bearing) — labeled as estimates.
+                    val estMeters = NetworkScanner.estimateDistanceMeters(scan.level, scan.frequency)
+                    val distanceRatio = (estMeters / 14.0).toFloat().coerceIn(0.2f, 0.78f)
                     val xPos = (0.5f + Math.cos(angle.toDouble()).toFloat() * distanceRatio * 0.32f).coerceIn(0.18f, 0.82f)
                     val yPos = (0.5f + Math.sin(angle.toDouble()).toFloat() * distanceRatio * 0.32f).coerceIn(0.18f, 0.82f)
                     nextSubjects.add(
@@ -566,21 +654,32 @@ fun EMFSentinelApp(
         }
     }
 
-    // Real-time coroutine signal EMF emulator
+    // Real-time telemetry loop — REAL magnetometer µT + REAL connected-Wi-Fi RSSI.
     LaunchedEffect(isScanning, isBubbleShieldActive, calibrationGain) {
         if (isScanning) {
             while (true) {
-                val noise = (Math.random() - 0.5) * 2.2
                 val shieldRatio = if (isBubbleShieldActive) 0.15f else 1.0f
-                val computed = ((42.8f + noise).toFloat() * calibrationGain * shieldRatio).coerceAtLeast(0.2f)
+                val rawMicroTesla = latestRealEmf
+                val computed: Float = if (rawMicroTesla != null) {
+                    (rawMicroTesla * calibrationGain * shieldRatio).coerceAtLeast(0.2f)
+                } else {
+                    // No magnetometer available — visibly labeled simulation.
+                    val noise = (Math.random() - 0.5) * 2.2
+                    ((42.8f + noise).toFloat() * calibrationGain * shieldRatio).coerceAtLeast(0.2f)
+                }
                 currentEmfReading = Math.round(computed * 10f) / 10f
-                
+
                 // Track dynamic statistics
                 sessionHistory = (sessionHistory + currentEmfReading).takeLast(25)
-                
-                // WiFi dynamic flux
-                wifiSignalIntensity = (-60 - (Math.random() * 8).toInt())
-                
+
+                // Real connected-network signal strength (fallback: labeled simulation)
+                val liveRssi = NetworkScanner.currentWifiInfo(context).rssi
+                wifiSignalIntensity = liveRssi ?: (-60 - (Math.random() * 8).toInt())
+
+                // Defensive RF monitor: detect synchronized across-the-board drops
+                // (signature of someone else jamming/interfering with nearby Wi-Fi)
+                wifiJamAlert = jammingDetector.evaluate(wifiScanResults.map { it.level }, liveRssi)
+
                 delay(900)
             }
         }
@@ -591,7 +690,7 @@ fun EMFSentinelApp(
         containerColor = if (isDarkMode) SpaceBlack else LightCanvas,
         topBar = {
             HeaderSection(
-                version = "v2.4",
+                version = "v${BuildConfig.VERSION_NAME}",
                 isDarkMode = isDarkMode,
                 onToggleTheme = onToggleTheme,
                 onGearClick = { showConfigurator = true }
@@ -609,12 +708,15 @@ fun EMFSentinelApp(
                     onTabSelect = { activeTab = it },
                     isDarkMode = isDarkMode
                 )
-                // 2. Google Ad banner placed directly BELOW the bottom navigation bar
-                AdMobBanner(
+                // 2. Anchored adaptive AdMob banner BELOW the nav bar.
+                // SDK-rendered ads only — a fixed-height slot is always reserved so
+                // navigation never jumps. Nothing is displayed while consent denies ads.
+                AnchoredAdaptiveBanner(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 4.dp),
-                    adUnitId = "ca-app-pub-4067724379997931/9096937952",
+                        .padding(start = 8.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
+                    adUnitId = BuildConfig.ADMOB_BANNER_UNIT_ID,
+                    canRequestAds = canRequestAds,
                     isDarkMode = isDarkMode
                 )
                 // 3. Android System Gesture / Navigation Inset Spacer
@@ -652,7 +754,14 @@ fun EMFSentinelApp(
                         isDarkMode = isDarkMode,
                         locationPermissionGranted = locationPermissionGranted,
                         isGpsEnabled = isGpsEnabled,
-                        onOpenLocationDialog = { showLocationPermissionDialog = true }
+                        onOpenLocationDialog = { showLocationPermissionDialog = true },
+                        emfIsSimulated = emfIsSimulated,
+                        wifiJamAlert = wifiJamAlert,
+                        lanScanInProgress = lanScanInProgress,
+                        lanDeviceCount = lanDevices.size,
+                        currentFloor = currentFloor,
+                        onOpenFloorPlanMapper = { showFloorPlanMapper = true },
+                        onLanDeviceScan = { lanScanTrigger = lanScanTrigger + 1 }
                     )
                     Tab.HEATMAP -> HeatmapScreen(
                         points = heatmapPointsList,
@@ -678,7 +787,9 @@ fun EMFSentinelApp(
                     Tab.HEALTH -> HealthScreen(
                         currentEmf = currentEmfReading,
                         isShieldActive = isBubbleShieldActive,
-                        onShieldToggle = { isBubbleShieldActive = it }
+                        onShieldToggle = { isBubbleShieldActive = it },
+                        emfIsSimulated = emfIsSimulated,
+                        historyAverage = if (sessionHistory.isNotEmpty()) sessionHistory.average().toFloat() else 42.8f
                     )
                 }
             }
@@ -711,7 +822,27 @@ fun EMFSentinelApp(
                     isDarkMode = isDarkMode,
                     onToggleTheme = onToggleTheme,
                     onOpenLocationDialog = { showLocationPermissionDialog = true },
+                    privacyOptionsRequired = privacyOptionsRequired,
+                    onShowPrivacyOptions = onShowPrivacyOptions,
                     onDismiss = { showConfigurator = false }
+                )
+            }
+
+            // Architect Floor-Plan Mapper — per-story walls + placed devices
+            if (showFloorPlanMapper) {
+                FloorPlanMapperDialog(
+                    store = floorPlanStore,
+                    startFloor = currentFloor,
+                    wifi = NetworkScanner.currentWifiInfo(context),
+                    lanDevices = lanDevices,
+                    onApply = { appliedPlan ->
+                        currentFloor = appliedPlan.floor
+                        surroundingWalls = appliedPlan.toSurroundingWalls()
+                        val nonDevices = activeSubjects.filter { it.type != "Device" }
+                        activeSubjects = nonDevices + appliedPlan.toTrackingSubjects()
+                        showFloorPlanMapper = false
+                    },
+                    onDismiss = { showFloorPlanMapper = false }
                 )
             }
         }
@@ -934,7 +1065,14 @@ fun ScannerScreen(
     isDarkMode: Boolean = true,
     locationPermissionGranted: Boolean = true,
     isGpsEnabled: Boolean = true,
-    onOpenLocationDialog: () -> Unit = {}
+    onOpenLocationDialog: () -> Unit = {},
+    emfIsSimulated: Boolean = false,
+    wifiJamAlert: Boolean = false,
+    lanScanInProgress: Boolean = false,
+    lanDeviceCount: Int = 0,
+    currentFloor: Int = 0,
+    onOpenFloorPlanMapper: () -> Unit = {},
+    onLanDeviceScan: () -> Unit = {}
 ) {
     val scrollState = rememberScrollState()
 
@@ -943,11 +1081,6 @@ fun ScannerScreen(
     var showAddDialog by remember { mutableStateOf(false) }
     var tappedCoordinate by remember { mutableStateOf<Offset?>(null) }
     var canvasSize by remember { mutableStateOf(Size.Zero) }
-
-    var isScanningForReflections by remember { mutableStateOf(false) }
-    var scanProgress by remember { mutableStateOf(0f) }
-    var scanMessage by remember { mutableStateOf("READY TO MAP ENVIRONMENT") }
-    var scanWaveAlpha by remember { mutableStateOf(0f) }
 
     // Wi-Fi Triangulation and Sensing States & Configuration
     var triangulationEnabled by remember { mutableStateOf(false) }
@@ -1035,57 +1168,9 @@ fun ScannerScreen(
         }
     }
 
-    LaunchedEffect(isScanningForReflections) {
-        if (isScanningForReflections) {
-            val steps = 30
-            val delayMs = 65L // total ~2 seconds scan animation
-            for (step in 1..steps) {
-                delay(delayMs)
-                scanProgress = step.toFloat() / steps
-                scanMessage = when {
-                    scanProgress < 0.25f -> "EMITTING COHERENT RADIAL EMF PULSES..."
-                    scanProgress < 0.50f -> "DETECTING CONCURRENT REFLECTION JUNCTIONS..."
-                    scanProgress < 0.75f -> "FILTERING MULTIPATH SIGNAL INTERFERENCES..."
-                    else -> "RENDERING EMF DIELECTRIC BOUNDARY SHIELD..."
-                }
-            }
-            
-            // Generate clean dynamic walls representing persistent EMF reflections
-            val generatedWalls = mutableListOf<SurroundingWall>()
-            val xMin = 0.12f + (Math.random().toFloat() - 0.5f) * 0.03f
-            val xMax = 0.88f + (Math.random().toFloat() - 0.5f) * 0.03f
-            val yMin = 0.12f + (Math.random().toFloat() - 0.5f) * 0.03f
-            val yMax = 0.88f + (Math.random().toFloat() - 0.5f) * 0.03f
-            
-            generatedWalls.add(SurroundingWall(start = Offset(xMin, yMin), end = Offset(xMax, yMin), name = "EMF North Reflection"))
-            generatedWalls.add(SurroundingWall(start = Offset(xMin, yMin), end = Offset(xMin, yMax), name = "EMF West Reflection"))
-            generatedWalls.add(SurroundingWall(start = Offset(xMax, yMin), end = Offset(xMax, yMax), name = "EMF East Reflection"))
-            generatedWalls.add(SurroundingWall(start = Offset(xMin, yMax), end = Offset(xMax, yMax), name = "EMF South Reflection"))
-            
-            // Add custom partitions
-            if (Math.random() < 0.5) {
-                generatedWalls.add(SurroundingWall(start = Offset((xMin + xMax) / 2f, yMin), end = Offset((xMin + xMax) / 2f, (yMin + yMax) * 0.45f), name = "Internal Partition Alpha"))
-                generatedWalls.add(SurroundingWall(start = Offset(xMin, (yMin + yMax) / 2f), end = Offset((xMin + xMax) * 0.55f, (yMin + yMax) / 2f), name = "Internal Partition Beta"))
-            } else {
-                generatedWalls.add(SurroundingWall(start = Offset((xMin + xMax) * 0.4f, yMin), end = Offset((xMin + xMax) * 0.4f, (yMin + yMax) * 0.7f), name = "Internal Core Wall"))
-                generatedWalls.add(SurroundingWall(start = Offset((xMin + xMax) * 0.4f, (yMin + yMax) * 0.7f), end = Offset(xMax, (yMin + yMax) * 0.7f), name = "Corridor Reflection Wall"))
-            }
-            
-            onSurroundingWallsChange(generatedWalls)
-            scanMessage = "STRUCTURE MAP COMPLETE - BOUNDARIES DEPLOYED"
-            scanWaveAlpha = 1.0f
-            isScanningForReflections = false
-        }
-    }
-
-    LaunchedEffect(scanWaveAlpha) {
-        if (scanWaveAlpha > 0f) {
-            while (scanWaveAlpha > 0f) {
-                delay(40)
-                scanWaveAlpha = (scanWaveAlpha - 0.05f).coerceAtLeast(0f)
-            }
-        }
-    }
+    // NOTE: the old "EMF Reflection Scan" fabricated random walls with Math.random().
+    // That was removed — real structure now comes exclusively from the calibrated
+    // Architect Floor-Plan Mapper (per building story), persisted on-device.
 
     // Sync hover/selected subject states with updated offsets
     LaunchedEffect(activeSubjects) {
@@ -1102,6 +1187,40 @@ fun ScannerScreen(
     ) {
         // Core Operator Greeting element integrated seamlessly!
         Greeting(name = operatorName)
+
+        // Defensive RF alert: signature of jamming/interference against nearby Wi-Fi
+        if (wifiJamAlert) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF450A0A)),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, Color.Red.copy(alpha = 0.5f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("⚠", fontSize = 16.sp)
+                    Column {
+                        Text(
+                            text = "RF INTERFERENCE ALERT",
+                            color = Color.Red,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Text(
+                            text = "All nearby Wi-Fi signals dropped together — possible jamming or heavy interference nearby. Your own network is NOT blocked by this app; this is an ambient detection only.",
+                            color = Slate200,
+                            fontSize = 8.sp,
+                            fontFamily = FontFamily.Monospace,
+                            lineHeight = 11.sp
+                        )
+                    }
+                }
+            }
+        }
 
         // 1. Primary EMF Meter Screen Widget Card
         Card(
@@ -1236,6 +1355,25 @@ fun ScannerScreen(
                                 fontWeight = FontWeight.Bold,
                                 fontFamily = FontFamily.SansSerif
                             )
+                        }
+
+                        // Honest badge: only shown when no real magnetometer exists
+                        if (emfIsSimulated) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(50.dp))
+                                    .background(Amber500.copy(alpha = 0.14f))
+                                    .border(1.dp, Amber500.copy(alpha = 0.4f), RoundedCornerShape(50.dp))
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = "SIMULATED SENSOR",
+                                    color = Amber500,
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = FontFamily.SansSerif
+                                )
+                            }
                         }
                     }
                 }
@@ -1425,42 +1563,6 @@ fun ScannerScreen(
                             topLeft = Offset(center.x - radiusBase, center.y - radiusBase),
                             size = Size(radiusBase * 2, radiusBase * 2)
                         )
-
-                        // Draw radial scan reflection wave lines when active
-                        if (isScanningForReflections) {
-                            val scanRadius = radiusBase * scanProgress
-                            // Main glowing scan ring
-                            drawCircle(
-                                color = Emerald500.copy(alpha = 0.6f * (1f - scanProgress)),
-                                radius = scanRadius,
-                                center = center,
-                                style = Stroke(width = 3.dp.toPx())
-                            )
-                            // Outer ghost ripple
-                            if (scanProgress > 0.15f) {
-                                drawCircle(
-                                    color = Emerald500.copy(alpha = 0.3f * (1f - scanProgress)),
-                                    radius = scanRadius * 0.8f,
-                                    center = center,
-                                    style = Stroke(width = 1.dp.toPx())
-                                )
-                            }
-                            // Inner solid glow
-                            drawCircle(
-                                color = Emerald500.copy(alpha = 0.08f * (1f - scanProgress)),
-                                radius = scanRadius,
-                                center = center
-                            )
-                        }
-
-                        // Complete flash effect
-                        if (scanWaveAlpha > 0f) {
-                            drawCircle(
-                                color = Emerald500.copy(alpha = scanWaveAlpha * 0.18f),
-                                radius = radiusBase * 1.2f,
-                                center = center
-                            )
-                        }
 
                         // Draw Wi-Fi Signal Propagation Paths & Human RF Shadowing Attenuation Link lines
                         if (triangulationEnabled) {
@@ -1854,15 +1956,15 @@ fun ScannerScreen(
                                 .background(Emerald500)
                         )
                         Text(
-                            text = "BIO-SYNC: ACTIVE",
-                            color = Emerald500,
+                            text = if (emfIsSimulated) "BIO-SYNC: SIMULATED SENSORS" else "BIO-SYNC: LIVE SENSORS",
+                            color = if (emfIsSimulated) Amber500 else Emerald500,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,
                             fontFamily = FontFamily.Monospace
                         )
                     }
                     Text(
-                        text = "TRACKING ${activeSubjects.size} SUBJECTS",
+                        text = "${floorLabel(currentFloor).uppercase()} • TRACKING ${activeSubjects.size} SUBJECTS",
                         color = Slate500,
                         fontSize = 8.sp,
                         fontWeight = FontWeight.Bold,
@@ -2361,50 +2463,40 @@ fun ScannerScreen(
                 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // EMF Environment Wall Scanning Action Bar
-                Row(
+                // ── REAL STRUCTURE + DEVICE PIPELINE ─────────────────────
+                // Architect blueprint (per building story) + live LAN discovery.
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(10.dp))
                         .background(SpaceBlack)
-                        .border(1.dp, if (isScanningForReflections) Emerald500.copy(alpha = 0.4f) else Zinc800, RoundedCornerShape(10.dp))
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                        .border(1.dp, Zinc800, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "EMF REFLECTION ANALYZER",
-                            color = Slate400,
-                            fontSize = 8.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.SansSerif,
-                            letterSpacing = 0.5.sp
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = scanMessage.uppercase(),
-                            color = if (isScanningForReflections) Emerald400 else Slate500,
-                            fontSize = 8.sp,
-                            fontFamily = FontFamily.Monospace,
-                            maxLines = 1,
-                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                        )
-                    }
+                    Text(
+                        text = "ARCHITECT FLOOR-PLAN SYNC — ${floorLabel(currentFloor).uppercase()}",
+                        color = Slate400,
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.SansSerif,
+                        letterSpacing = 0.5.sp
+                    )
+                    Text(
+                        text = "WALLS MAPPED: ${surroundingWalls.size} • DEVICES DEPLOYED: ${activeSubjects.count { it.type == "Device" }} • LAN DISCOVERED: $lanDeviceCount",
+                        color = Slate500,
+                        fontSize = 8.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                    )
 
-                    Spacer(modifier = Modifier.width(12.dp))
-
-                    if (isScanningForReflections) {
-                        CircularProgressIndicator(
-                            progress = { scanProgress },
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp,
-                            color = Emerald500,
-                            trackColor = Zinc800
-                        )
-                    } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         Button(
-                            onClick = { isScanningForReflections = true },
+                            onClick = onOpenFloorPlanMapper,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = Emerald500.copy(alpha = 0.15f),
                                 contentColor = Emerald400
@@ -2412,38 +2504,62 @@ fun ScannerScreen(
                             shape = RoundedCornerShape(6.dp),
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                             modifier = Modifier
-                                .height(26.dp)
+                                .height(28.dp)
+                                .weight(1f)
                                 .border(1.dp, Emerald500.copy(alpha = 0.3f), RoundedCornerShape(6.dp))
-                                .testTag("scan_environment_button")
+                                .testTag("open_floorplan_mapper_button")
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = "Scan icon",
-                                tint = Emerald400,
-                                modifier = Modifier.size(11.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = "REFLECTIONS SCAN",
+                                text = "🏛 ARCHITECT MAP",
                                 fontSize = 8.sp,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Bold
                             )
                         }
-                    }
-                }
 
-                // If scanning is active, render a sleek progress bar below it
-                if (isScanningForReflections) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    LinearProgressIndicator(
-                        progress = { scanProgress },
-                        color = Emerald500,
-                        trackColor = Zinc800,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(2.dp)
-                            .clip(RoundedCornerShape(1.dp))
+                        Button(
+                            onClick = onLanDeviceScan,
+                            enabled = !lanScanInProgress,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Emerald500.copy(alpha = 0.15f),
+                                contentColor = Emerald400
+                            ),
+                            shape = RoundedCornerShape(6.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            modifier = Modifier
+                                .height(28.dp)
+                                .weight(1f)
+                                .border(1.dp, Emerald500.copy(alpha = 0.3f), RoundedCornerShape(6.dp))
+                                .testTag("lan_device_scan_button")
+                        ) {
+                            if (lanScanInProgress) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(12.dp),
+                                    strokeWidth = 1.5.dp,
+                                    color = Emerald400,
+                                    trackColor = Zinc800
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text("SWEEPING…", fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = "LAN scan",
+                                    tint = Emerald400,
+                                    modifier = Modifier.size(11.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("LAN DEVICE SCAN", fontSize = 8.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
+                    Text(
+                        text = "Phones can't image walls through concrete by radio — draw/calibrate the blueprint per story, then drag each discovered device into its real room. Distances & signals shown are live RSSI/FSPL estimates.",
+                        color = Slate600,
+                        fontSize = 7.sp,
+                        fontFamily = FontFamily.Monospace,
+                        lineHeight = 9.sp
                     )
                 }
                 
@@ -3223,6 +3339,10 @@ fun ARViewScreen(
     var thermalTrackingOn by remember { mutableStateOf(true) }
     var captureLogMessage by remember { mutableStateOf("SCAN OVERVIEW SECURE // LINK STANDBY") }
 
+    // IR Lens Finder (hidden-camera sweep): red filter + torch, user scans visually
+    var irFinderOn by remember { mutableStateOf(false) }
+    var boundCamera by remember { mutableStateOf<androidx.camera.core.Camera?>(null) }
+
     // Live ping state
     var pingingSubject by remember { mutableStateOf<TrackingSubject?>(null) }
     var pingProgress by remember { mutableStateOf(0f) }
@@ -3243,6 +3363,15 @@ fun ARViewScreen(
     LaunchedEffect(Unit) {
         if (!hasCameraPermission) {
             cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    // Torch follows the IR finder so lens glints reflect back while sweeping
+    LaunchedEffect(irFinderOn) {
+        try {
+            boundCamera?.cameraControl?.enableTorch(irFinderOn)
+        } catch (t: Throwable) {
+            t.printStackTrace()
         }
     }
 
@@ -3315,7 +3444,7 @@ fun ARViewScreen(
                             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
                             try {
                                 provider.unbindAll()
-                                provider.bindToLifecycle(
+                                boundCamera = provider.bindToLifecycle(
                                     lifecycleOwner,
                                     cameraSelector,
                                     previewUseCase
@@ -3350,6 +3479,15 @@ fun ARViewScreen(
                         )
                     }
                 }
+            }
+
+            // IR LENS FINDER: red filter overlay — hidden cam lenses glint through it
+            if (irFinderOn) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Red.copy(alpha = 0.10f))
+                )
             }
 
             // Continuous scanning sweep effect
@@ -3677,6 +3815,44 @@ fun ARViewScreen(
                             .testTag("ar_target_overlay_switch")
                     )
                 }
+
+                // ── IR Lens Finder toggle (real hidden-camera sweep aid) ──
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "🔴 IR LENS FINDER — hidden camera sweep",
+                            color = Slate400,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Darken the room and scan slowly. Night-vision IR LEDs show as bright dots on screen that your eyes can't see. Heuristic aid — always verify finds manually.",
+                            color = Slate500,
+                            fontSize = 8.sp,
+                            lineHeight = 11.sp
+                        )
+                    }
+                    Switch(
+                        checked = irFinderOn,
+                        onCheckedChange = {
+                            irFinderOn = it
+                            captureLogMessage = if (it) "IR LENS FINDER ON — TORCH ACTIVE // SWEEP SLOWLY" else "IR LENS FINDER OFF"
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color(0xFFEF5350),
+                            checkedTrackColor = Color(0xFFEF5350).copy(alpha = 0.35f),
+                            uncheckedThumbColor = Slate500,
+                            uncheckedTrackColor = Zinc800
+                        ),
+                        modifier = Modifier
+                            .scale(0.8f)
+                            .testTag("ir_lens_finder_switch")
+                    )
+                }
             }
         }
         Spacer(modifier = Modifier.height(10.dp))
@@ -3890,7 +4066,9 @@ fun CategorizedEmitterRow(
 fun HealthScreen(
     currentEmf: Float,
     isShieldActive: Boolean,
-    onShieldToggle: (Boolean) -> Unit
+    onShieldToggle: (Boolean) -> Unit,
+    emfIsSimulated: Boolean = false,
+    historyAverage: Float = 42.8f
 ) {
     val scrollState = rememberScrollState()
 
@@ -3966,6 +4144,59 @@ fun HealthScreen(
                         )
                     }
                 }
+            }
+        }
+
+        // ── REAL-TIME EMF SWEEP — hidden electronics / possible camera aid ──
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Zinc900.copy(alpha = 0.5f)),
+            shape = RoundedCornerShape(24.dp),
+            border = BorderStroke(1.dp, if (currentEmf > historyAverage * 1.6f) Amber500.copy(alpha = 0.5f) else Zinc800),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text(
+                    text = "HIDDEN-ELECTRONICS EMF SWEEP",
+                    color = Slate200,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.SansSerif,
+                    letterSpacing = 0.5.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                val spike = currentEmf > (historyAverage * 1.6f).coerceAtLeast(historyAverage + 8f)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(if (spike) Amber500 else Emerald500)
+                    )
+                    Text(
+                        text = if (spike) "FIELD SPIKE — inspect this spot closely" else "Baseline nominal — sweeping…",
+                        color = if (spike) Amber500 else Emerald400,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Live: ${String.format("%.1f", currentEmf)} µT  •  Session baseline: ${String.format("%.1f", historyAverage)} µT${if (emfIsSimulated) "  (SIMULATED SENSOR)" else ""}",
+                    color = Slate400,
+                    fontSize = 9.sp,
+                    fontFamily = FontFamily.Monospace
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Move the phone slowly along walls, clocks, smoke detectors, chargers and decor. Active electronics (including hidden cameras) push the magnetometer above baseline — but so do wiring and metal. This is a heuristic aid, not proof of a camera.",
+                    color = Slate500,
+                    fontSize = 9.sp,
+                    lineHeight = 13.sp
+                )
             }
         }
 
@@ -4086,6 +4317,8 @@ fun SettingsConfiguratorDialog(
     isDarkMode: Boolean = true,
     onToggleTheme: () -> Unit = {},
     onOpenLocationDialog: () -> Unit = {},
+    privacyOptionsRequired: Boolean = false,
+    onShowPrivacyOptions: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     Dialog(onDismissRequest = onDismiss) {
@@ -4316,6 +4549,51 @@ fun SettingsConfiguratorDialog(
                     )
                 }
 
+                // UMP Privacy Options — REQUIRED by AdMob when the consent framework
+                // flags this user (EEA/UK etc.). Re-evaluates ads eligibility after changes.
+                if (privacyOptionsRequired) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (isDarkMode) Zinc900 else LightSurfaceVariant)
+                            .clickable {
+                                onDismiss()
+                                onShowPrivacyOptions()
+                            }
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("🔒", fontSize = 16.sp)
+                            Column {
+                                Text(
+                                    text = "PRIVACY OPTIONS",
+                                    color = if (isDarkMode) Slate50 else LightTextPrimary,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = FontFamily.SansSerif
+                                )
+                                Text(
+                                    text = "Manage ad consent & data choices",
+                                    color = if (isDarkMode) Slate400 else LightTextSecondary,
+                                    fontSize = 9.sp
+                                )
+                            }
+                        }
+                        Text(
+                            text = "OPEN >",
+                            color = Emerald500,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(4.dp))
 
                 // Dismiss Action Button
@@ -4503,298 +4781,3 @@ fun LocationPermissionDialog(
     }
 }
 
-// Dynamic Sponsored Ad Campaign Data Model
-data class AdCampaign(
-    val id: String,
-    val title: String,
-    val subtitle: String,
-    val rating: String,
-    val ctaText: String,
-    val iconColor1: Color,
-    val iconColor2: Color,
-    val iconVector: ImageVector,
-    val targetUrl: String
-)
-
-val sampleAdCampaigns = listOf(
-    AdCampaign(
-        id = "play_store",
-        title = "Google Play Store",
-        subtitle = "4.8 • Top Apps & Games",
-        rating = "4.8",
-        ctaText = "INSTALL",
-        iconColor1 = Color(0xFF4285F4),
-        iconColor2 = Color(0xFF34A853),
-        iconVector = Icons.Filled.PlayArrow,
-        targetUrl = "https://play.google.com/store"
-    ),
-    AdCampaign(
-        id = "cyber_vpn",
-        title = "Shield VPN & Security",
-        subtitle = "4.9 • Encrypted Wi-Fi Protection",
-        rating = "4.9",
-        ctaText = "INSTALL",
-        iconColor1 = Color(0xFF00C853),
-        iconColor2 = Color(0xFF00B0FF),
-        iconVector = Icons.Filled.Lock,
-        targetUrl = "https://play.google.com/store/apps"
-    ),
-    AdCampaign(
-        id = "cloud_suite",
-        title = "Google Developer Suite",
-        subtitle = "4.7 • Cloud AI & Services",
-        rating = "4.7",
-        ctaText = "GET APP",
-        iconColor1 = Color(0xFFEA4335),
-        iconColor2 = Color(0xFFFBBC05),
-        iconVector = Icons.Filled.Star,
-        targetUrl = "https://play.google.com/store"
-    ),
-    AdCampaign(
-        id = "smart_meter",
-        title = "Sensor Tool Suite Pro",
-        subtitle = "4.8 • Hardware Diagnostics",
-        rating = "4.8",
-        ctaText = "TRY NOW",
-        iconColor1 = Color(0xFF8E24AA),
-        iconColor2 = Color(0xFF3949AB),
-        iconVector = Icons.Filled.Build,
-        targetUrl = "https://play.google.com/store/apps"
-    )
-)
-
-@Composable
-fun AdMobBanner(
-    modifier: Modifier = Modifier,
-    adUnitId: String = "ca-app-pub-4067724379997931/9096937952",
-    isDarkMode: Boolean = true
-) {
-    var isAdLoaded by remember { mutableStateOf(false) }
-    var currentCampaignIndex by remember { mutableIntStateOf(0) }
-    var adViewInstance by remember { mutableStateOf<AdView?>(null) }
-    val context = LocalContext.current
-
-    // Dynamic rotation timer: cycles every 12 seconds
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(12000L)
-            currentCampaignIndex = (currentCampaignIndex + 1) % sampleAdCampaigns.size
-            // Trigger AdMob refresh request
-            try {
-                adViewInstance?.loadAd(AdRequest.Builder().build())
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-
-    val currentCampaign = sampleAdCampaigns[currentCampaignIndex]
-
-    // Standard AdMob Banner Container (56dp height)
-    Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(56.dp)
-            .clip(RoundedCornerShape(8.dp)),
-        color = if (isDarkMode) Color(0xFF1E2022) else Color(0xFFFFFFFF),
-        shadowElevation = 2.dp,
-        border = BorderStroke(1.dp, if (isDarkMode) Color(0xFF333639) else Color(0xFFE0E0E0))
-    ) {
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
-        ) {
-            // Animated Dynamic Google AdMob Banner Layout
-            AnimatedContent(
-                targetState = currentCampaign,
-                transitionSpec = {
-                    fadeIn(animationSpec = tween(500)) togetherWith fadeOut(animationSpec = tween(500))
-                },
-                label = "AdBannerAnimation"
-            ) { campaign ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clickable {
-                            try {
-                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(campaign.targetUrl))
-                                context.startActivity(intent)
-                            } catch (e: Exception) {
-                                e.printStackTrace()
-                            }
-                        }
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    // App / Ad Icon with Dynamic Gradient
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(
-                                Brush.linearGradient(
-                                    colors = listOf(campaign.iconColor1, campaign.iconColor2)
-                                )
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = campaign.iconVector,
-                            contentDescription = "Ad Icon",
-                            tint = Color.White,
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
-
-                    // Middle Text & Ratings
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxHeight(),
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        // Top: [Ad] badge + Title
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            // Official Google Ad Green Pill
-                            Box(
-                                modifier = Modifier
-                                    .border(1.dp, Color(0xFF0F9D58), RoundedCornerShape(3.dp))
-                                    .background(Color(0xFF0F9D58).copy(alpha = 0.12f))
-                                    .padding(horizontal = 3.dp, vertical = 0.5.dp)
-                            ) {
-                                Text(
-                                    text = "Ad",
-                                    color = Color(0xFF0F9D58),
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    lineHeight = 10.sp
-                                )
-                            }
-                            Text(
-                                text = campaign.title,
-                                color = if (isDarkMode) Color(0xFFF1F3F4) else Color(0xFF202124),
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1
-                            )
-                        }
-
-                        // Bottom: Star Rating & Subtitle
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(3.dp)
-                        ) {
-                            Row {
-                                repeat(5) {
-                                    Icon(
-                                        imageVector = Icons.Filled.Star,
-                                        contentDescription = null,
-                                        tint = Color(0xFFFBBC04),
-                                        modifier = Modifier.size(10.dp)
-                                    )
-                                }
-                            }
-                            Text(
-                                text = campaign.subtitle,
-                                color = if (isDarkMode) Color(0xFF9AA0A6) else Color(0xFF5F6368),
-                                fontSize = 10.sp,
-                                maxLines = 1
-                            )
-                        }
-                    }
-
-                    // Right Side: CTA Button + AdChoices icon
-                    Column(
-                        horizontalAlignment = Alignment.End,
-                        verticalArrangement = Arrangement.SpaceBetween,
-                        modifier = Modifier.fillMaxHeight()
-                    ) {
-                        // AdChoices / Info Icon
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(2.dp)
-                        ) {
-                            Canvas(modifier = Modifier.size(8.dp)) {
-                                val path = Path().apply {
-                                    moveTo(size.width, 0f)
-                                    lineTo(0f, 0f)
-                                    lineTo(size.width, size.height)
-                                    close()
-                                }
-                                drawPath(path, color = Color(0xFF1A73E8))
-                            }
-                            Text(
-                                text = "AdChoices",
-                                fontSize = 7.sp,
-                                color = Color(0xFF1A73E8),
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-
-                        // Google Action CTA Button
-                        Button(
-                            onClick = {
-                                try {
-                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(campaign.targetUrl))
-                                    context.startActivity(intent)
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFF1A73E8),
-                                contentColor = Color.White
-                            ),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.height(26.dp)
-                        ) {
-                            Text(
-                                text = campaign.ctaText,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Real AdMob AdView Layer (renders directly when live network inventory fills)
-            AndroidView(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(50.dp)
-                    .alpha(if (isAdLoaded) 1f else 0f),
-                factory = { ctx ->
-                    AdView(ctx).apply {
-                        adViewInstance = this
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT
-                        )
-                        setAdSize(AdSize.BANNER)
-                        setAdUnitId(adUnitId)
-                        adListener = object : AdListener() {
-                            override fun onAdLoaded() {
-                                super.onAdLoaded()
-                                isAdLoaded = true
-                            }
-                            override fun onAdFailedToLoad(loadAdError: LoadAdError) {
-                                super.onAdFailedToLoad(loadAdError)
-                                isAdLoaded = false
-                            }
-                        }
-                        loadAd(AdRequest.Builder().build())
-                    }
-                },
-                update = {
-                    // Update ad view state
-                }
-            )
-        }
-    }
-}

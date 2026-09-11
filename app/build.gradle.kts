@@ -1,9 +1,7 @@
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
-  alias(libs.plugins.google.devtools.ksp)
   alias(libs.plugins.roborazzi)
-  alias(libs.plugins.secrets)
 }
 
 android {
@@ -42,9 +40,33 @@ android {
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = signingConfigs.getByName("release")
+
+      // PRODUCTION IDs — overridable via gradle.properties / -P flags or env at build time.
+      // Defaults transcribed from the owner's brief; CONFIRM against the AdMob console
+      // (Apps → app-ads.txt / All apps  and  Ad units) before publishing.
+      val prodAppId = (project.findProperty("ADMOB_APP_ID") as? String)
+        ?: "ca-app-pub-4067724379997931~6208950543"
+      val prodBannerUnit = (project.findProperty("ADMOB_BANNER_UNIT_ID") as? String)
+        ?: "ca-app-pub-4067724379997931/4082502150"
+      buildConfigField("String", "ADMOB_APP_ID", "\"$prodAppId\"")
+      buildConfigField("String", "ADMOB_BANNER_UNIT_ID", "\"$prodBannerUnit\"")
+      manifestPlaceholders["ADMOB_APPLICATION_ID"] = prodAppId
     }
     debug {
       signingConfig = signingConfigs.getByName("debugConfig")
+      isCrunchPngs = false // skip AAPT2 PNG crunch on dev builds (faster, far less native memory)
+      // Google TEST inventory only — never serve live ads in development builds.
+      buildConfigField("String", "ADMOB_APP_ID", "\"ca-app-pub-3940256099942544~3347511713\"")
+      buildConfigField("String", "ADMOB_BANNER_UNIT_ID", "\"ca-app-pub-3940256099942544/9214589741\"")
+      manifestPlaceholders["ADMOB_APPLICATION_ID"] = "ca-app-pub-3940256099942544~3347511713"
+    }
+    create("qa") {
+      initWith(getByName("debug"))
+      // QA: your REAL AdMob App ID (so your own Privacy & messaging / UMP configuration
+      // is exercised) combined with Google's TEST banner unit (no live impressions).
+      buildConfigField("String", "ADMOB_APP_ID", "\"ca-app-pub-4067724379997931~6208950543\"")
+      buildConfigField("String", "ADMOB_BANNER_UNIT_ID", "\"ca-app-pub-3940256099942544/9214589741\"")
+      manifestPlaceholders["ADMOB_APPLICATION_ID"] = "ca-app-pub-4067724379997931~6208950543"
     }
   }
   compileOptions {
@@ -58,18 +80,12 @@ android {
   testOptions { unitTests { isIncludeAndroidResources = true } }
 }
 
-// Configure the Secrets Gradle Plugin to use .env and .env.example files
-// to match the convention used in Web projects.
-secrets {
-  propertiesFileName = ".env"
-  defaultPropertiesFileName = ".env.example"
-}
+// No .env / secrets: this app needs NO API keys of any kind.
 
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
-  implementation(platform(libs.firebase.bom))
   // implementation(libs.accompanist.permissions)
   implementation(libs.androidx.activity.compose)
   implementation(libs.androidx.camera.camera2)
@@ -88,19 +104,12 @@ dependencies {
   implementation(libs.androidx.lifecycle.runtime.ktx)
   implementation(libs.androidx.lifecycle.viewmodel.compose)
   // implementation(libs.androidx.navigation.compose)
-  implementation(libs.androidx.room.ktx)
-  implementation(libs.androidx.room.runtime)
   // implementation(libs.coil.compose)
-  implementation(libs.converter.moshi)
-  // implementation(libs.firebase.ai)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
-  implementation(libs.logging.interceptor)
-  implementation(libs.moshi.kotlin)
-  implementation(libs.okhttp)
   // implementation(libs.play.services.location)
-  implementation(libs.retrofit)
   implementation(libs.play.services.ads)
+  implementation(libs.ump.user.messaging.platform)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
@@ -117,6 +126,4 @@ dependencies {
   androidTestImplementation(libs.androidx.runner)
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   debugImplementation(libs.androidx.compose.ui.tooling)
-  "ksp"(libs.androidx.room.compiler)
-  "ksp"(libs.moshi.kotlin.codegen)
 }

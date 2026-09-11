@@ -22,18 +22,14 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.MyApplication">
 
-        <!-- Google AdMob Application ID config -->
+        <!-- Google AdMob Application ID config. The actual value is injected per build
+             variant by app/build.gradle.kts (manifestPlaceholders ADMOB_APPLICATION_ID):
+             debug   -> Google sample App ID (test ads only)
+             qa      -> production App ID + Google TEST banner unit
+             release -> production App ID -->
         <meta-data
             android:name="com.google.android.gms.ads.APPLICATION_ID"
-            android:value="ca-app-pub-4067724379997931~6208950543"/>
-
-        <!-- Disable Firebase Analytics automatic collection to prevent missing google_app_id errors when google-services.json is absent -->
-        <meta-data
-            android:name="firebase_analytics_collection_enabled"
-            android:value="false" />
-        <meta-data
-            android:name="google_analytics_adid_collection_enabled"
-            android:value="false" />
+            android:value="${ADMOB_APPLICATION_ID}"/>
 
         <activity
             android:name=".MainActivity"

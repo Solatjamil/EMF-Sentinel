@@ -18,3 +18,9 @@ app/build/
 local.properties
 .env
 debug.keystore
+# NEVER commit signing material to git (it is currently in history — rotate the upload key!)
+my-upload-key.jks
+upload_certificate.pem
+*.jks
+*.keystore
+artifacts/
