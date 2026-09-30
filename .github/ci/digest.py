@@ -31,7 +31,7 @@ def esc_prop(s):
     return esc_data(s).replace(":", "%3A").replace(",", "%2C")
 
 
-def emit(level, title, text):
+def emit(level, title, text, max_chunks=MAX_CHUNKS):
     chunks, cur, size = [], [], 0
     for line in text.splitlines():
         line = line[:380]
@@ -44,9 +44,9 @@ def emit(level, title, text):
         chunks.append("\n".join(cur))
     if not chunks:
         chunks = ["(empty)"]
-    if len(chunks) > MAX_CHUNKS:
-        dropped = len(chunks) - (MAX_CHUNKS - 1)
-        chunks = chunks[: MAX_CHUNKS - 1] + ["... %d more chunk(s) omitted" % dropped]
+    if len(chunks) > max_chunks:
+        dropped = len(chunks) - (max_chunks - 1)
+        chunks = chunks[: max_chunks - 1] + ["... %d more chunk(s) omitted" % dropped]
     for i, chunk in enumerate(chunks, 1):
         t = title if len(chunks) == 1 else "%s [%d/%d]" % (title, i, len(chunks))
         print("::%s title=%s::%s" % (level, esc_prop(t), esc_data(chunk)))
@@ -223,7 +223,7 @@ def smoke(title, out):
     summary += "\n-- launch: " + " ".join(rd("launch.txt").split())[:200]
     summary += "\n\n-- ApplicationExitInfo (dumpsys activity exit-info):\n" + "\n".join(exit_info[:26])
     summary += "\n\n-- events buffer, lines about the app:\n" + "\n".join(events[:24])
-    emit("notice", "%s: device, launch, process lifetime, exit reasons" % title, summary)
+    emit("notice", "%s: device, launch, process lifetime, exit reasons" % title, summary, max_chunks=2)
 
     # real crash evidence only: the dedicated crash buffer + error-level AndroidRuntime/ANR lines
     crash = [l for l in rd("crash.txt").splitlines() if l.strip()]
@@ -250,7 +250,7 @@ def smoke(title, out):
 
     ui = rd("ui_findings.txt")
     if ui:
-        emit("notice", "%s: what the screen showed" % title, ui)
+        emit("notice", "%s: what the screen showed" % title, ui, max_chunks=4)
 
     win = rd("dumpsys_window.txt").splitlines()
     insets = [l.strip() for l in win if re.search(r"InsetsSource id=\S+ type=(statusBars|navigationBars|displayCutout)", l)]

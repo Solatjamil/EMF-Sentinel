@@ -257,13 +257,13 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: "Build the R8 release APK with Google DEMO ad ids (CI must never request live ads)"
+      - name: "Build the R8 release APK with Google DEMO ad ids, native = the demo NATIVE VIDEO unit (CI must never request live ads)"
         run: >-
           bash .github/ci/run_step.sh smoke_build gradle
           gradle --no-daemon :app:assembleRelease
           -PADMOB_APP_ID=ca-app-pub-3940256099942544~3347511713
           -PADMOB_BANNER_UNIT_ID=ca-app-pub-3940256099942544/9214589741
-          -PADMOB_NATIVE_UNIT_ID=ca-app-pub-3940256099942544/2247696110
+          -PADMOB_NATIVE_UNIT_ID=ca-app-pub-3940256099942544/1044960115
 
       - name: "Build the plain (no R8) debug APK to tell R8 effects from everything else"
         run: bash .github/ci/run_step.sh smoke_build_debug gradle gradle --no-daemon :app:assembleDebug

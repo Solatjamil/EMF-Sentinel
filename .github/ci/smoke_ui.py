@@ -122,7 +122,7 @@ def visit(tab, width, height, dpi):
     tap(target)
     time.sleep(4)
     found = None
-    for step in range(10):
+    for step in range(8):
         nodes = dump("%s_%d" % (tab.lower(), step))
         if nodes is None:
             break
@@ -133,7 +133,7 @@ def visit(tab, width, height, dpi):
         adb("shell", "input", "swipe", str(width // 2), str(int(height * 0.72)), str(width // 2), str(int(height * 0.28)), "350")
         time.sleep(1.5)
     if not found:
-        say("NO native-ad 'Ad' badge found on %s after scrolling (10 dumps). Last texts on screen:" % tab)
+        say("NO native-ad 'Ad' badge found on %s after scrolling (8 dumps). Last texts on screen:" % tab)
         if nodes:
             for row in texts(nodes, 25):
                 say(row)
@@ -173,6 +173,68 @@ def any_texts(nodes, limit=20):
     return rows[:limit]
 
 
+def crash_lines():
+    _, out = adb("logcat", "-b", "crash", "-d", "-v", "brief")
+    return [l for l in out.splitlines() if "FATAL EXCEPTION" in l or "Fatal signal" in l]
+
+
+def alive():
+    _, out = adb("shell", "pidof", PKG)
+    return bool(out.strip())
+
+
+def checkpoint(name):
+    ok_alive, fatal = alive(), crash_lines()
+    say("  checkpoint %-26s process alive=%s   fatal lines in crash buffer=%d" % (name, ok_alive, len(fatal)))
+    return ok_alive and not fatal
+
+
+def exercise(width, height, dpi):
+    """Walk the rest of the app. A missing R8 keep rule can hide in any screen, so after every step the
+    process must still be alive and the crash buffer empty."""
+    say("")
+    say("=== exercising the rest of the app (process must survive every step) ===")
+    checkpoint("before exercising")
+    for tab in ("Heatmap", "AR Scan", "Scanner"):
+        nodes = dump("x_pre_" + tab.lower().replace(" ", "_"))
+        target = find_label(nodes, tab) if nodes else None
+        if target is None:
+            say("  tab '%s' not found on screen" % tab)
+            continue
+        tap(target)
+        time.sleep(6 if tab == "AR Scan" else 3)
+        after = dump("x_" + tab.lower().replace(" ", "_"))
+        say("  opened %-9s -> %d text nodes on screen" % (tab, len([n for n in app_nodes(after or []) if label(n)])))
+        if tab == "AR Scan" and after:
+            for row in texts(after, 14):
+                say(row)
+        checkpoint("tab " + tab)
+    nodes = dump("x_pre_chrome") or []
+    gear = [n for n in app_nodes(nodes) if "\u2699" in label(n)]          # the settings gear
+    if gear:
+        tap(gear[0])
+        time.sleep(3)
+        dialog = dump("x_settings") or []
+        say("  settings dialog: %d text nodes; first rows:" % len([n for n in app_nodes(dialog) if label(n)]))
+        for row in texts(dialog, 12):
+            say(row)
+        checkpoint("settings dialog open")
+        adb("shell", "input", "keyevent", "4")                              # BACK closes the dialog
+        time.sleep(2)
+        checkpoint("settings dialog closed")
+    else:
+        say("  settings gear not found")
+    for round_no in (1, 2):                                                  # dark -> light -> dark
+        nodes = dump("x_theme_%d" % round_no) or []
+        toggle = [n for n in app_nodes(nodes) if "\u2600" in label(n) or "\U0001F319" in label(n)]
+        if not toggle:
+            say("  theme toggle not found")
+            break
+        tap(toggle[0])
+        time.sleep(3)
+        checkpoint("theme toggle #%d" % round_no)
+
+
 def main():
     width, height = screen_size()
     dpi = density()
@@ -205,6 +267,7 @@ def main():
     say("possible dialog / consent text on the first screen: %s" % (blockers[:6] or "none"))
     for tab in ("Insights", "Health"):
         visit(tab, width, height, dpi)
+    exercise(width, height, dpi)
 
 
 if __name__ == "__main__":
