@@ -225,19 +225,40 @@ def smoke(title, out):
     summary += "\n\n-- events buffer, lines about the app:\n" + "\n".join(events[:24])
     emit("notice", "%s: device, launch, process lifetime, exit reasons" % title, summary, max_chunks=2)
 
-    # real crash evidence only: the dedicated crash buffer + error-level AndroidRuntime/ANR lines
+    # real crash evidence only. The crash buffer also collects crashes of OTHER processes (the uiautomator
+    # tool, system apps); only blocks that name the app or carry its pid are the app's.
     crash = [l for l in rd("crash.txt").splitlines() if l.strip()]
     logcat = rd("logcat.txt").splitlines()
-    real = re.compile(r"FATAL EXCEPTION|E AndroidRuntime|has died|Force finishing activity com\.goshbuzz|"
-                      r"ANR in com\.goshbuzz|Fatal signal|Process: com\.goshbuzz")
-    main_hits = [i for i, l in enumerate(logcat) if real.search(l) and "goshbuzz" in " ".join(logcat[max(0, i - 3): i + 4])]
+    pids = set(re.findall(r"pid_at_\w+=(\d+)", env))
     crash_body = [l for l in crash if not l.startswith("---------")]
-    if crash_body or main_hits:
-        text = "CRASH BUFFER (%d lines):\n%s" % (len(crash_body), "\n".join(crash_body[:70]))
+
+    def names_app(ctx):
+        return "goshbuzz" in ctx or any(re.search(r"(?:PID: |pid |tid )%s\b" % pid, ctx) for pid in pids)
+
+    fatal_idx = [i for i, l in enumerate(crash_body) if "FATAL EXCEPTION" in l or "Fatal signal" in l]
+
+    def block(i):       # the header plus the next lines, but never into the following crash block
+        later = [j for j in fatal_idx if j > i]
+        return crash_body[i: min(i + 4, later[0] if later else i + 4)]
+
+    app_fatal = [i for i in fatal_idx if names_app(" ".join(block(i)))]
+    other_fatal = [i for i in fatal_idx if i not in app_fatal]
+    app_lines = [l for l in crash_body if "goshbuzz" in l]
+    main_hits = [i for i, l in enumerate(logcat)
+                 if re.search(r"Process: com\.goshbuzz|ANR in com\.goshbuzz|Force finishing activity com\.goshbuzz|"
+                              r"Process com\.goshbuzz\S* \(pid \d+\) has died", l)
+                 or ("FATAL EXCEPTION" in l and "goshbuzz" in " ".join(logcat[i:i + 4]))]
+    if app_fatal or app_lines or main_hits:
+        first = crash_body[app_fatal[0]:][:70] if app_fatal else crash_body[:70]
+        text = "APP CRASH BLOCKS in the crash buffer: %d\n%s" % (len(app_fatal), "\n".join(first))
         if main_hits:
             i = main_hits[0]
             text += "\n\nMAIN LOG around the first hit:\n" + "\n".join(logcat[max(0, i - 4): i + 22])
         emit("error", "%s: CRASH evidence" % title, text)
+    elif other_fatal:
+        heads = [crash_body[i].split(": ", 1)[-1][:80] for i in other_fatal]
+        emit("notice", "%s: no crash of the app (crash buffer has %d block(s) from OTHER processes)" % (title, len(other_fatal)),
+             "app pids %s do not appear; the blocks are: %s" % (sorted(pids) or "?", "; ".join(heads)))
     else:
         emit("notice", "%s: crash buffer is empty and no fatal/ANR line for the app in the main log (%d lines)" % (title, len(logcat)), "clean")
 
@@ -255,29 +276,7 @@ def smoke(title, out):
 
     ui = rd("ui_findings.txt")
     if ui:
-        emit("notice", "%s: what the screen showed" % title, ui, max_chunks=4)
-
-    win = rd("dumpsys_window.txt").splitlines()
-    insets = [l.strip() for l in win if re.search(r"InsetsSource id=\S+ type=(statusBars|navigationBars|displayCutout)", l)]
-    wins = rd("dumpsys_windows.txt").splitlines()
-    block, inside = [], False
-    for l in wins:
-        if re.search(r"Window #\d+ Window\{\w+ u\d+ com\.goshbuzz\.emfsentinel/", l):
-            inside = True
-            block.append(l.strip())
-            continue
-        if inside and re.search(r"^\s*Window #\d+ ", l):
-            break
-        if inside and re.search(r"mAttrs=|Frames:|isReadyForDisplay|mHasSurface|mViewVisibility", l):
-            block.append(l.strip())
-    emit("notice", "%s: window / inset facts" % title,
-         "SYSTEM INSET SOURCES:\n" + "\n".join(dict.fromkeys(insets))[:1500] +
-         "\n\nTHE APP'S OWN WINDOW:\n" + ("\n".join(block[:14]) or "(app window not found in dumpsys window windows)"))
-
-    hier = rd("dumpsys_activity_top.txt").splitlines()
-    views = [l.strip() for l in hier if re.search(r"NativeAdView|MediaView|AdChoices|nativead|AndroidComposeView", l)]
-    emit("notice", "%s: real view classes (dumpsys activity top)" % title,
-         "\n".join(views[:30]) or "(no NativeAdView / MediaView in the top activity's hierarchy)")
+        emit("notice", "%s: what the screen showed" % title, ui, max_chunks=6)
 
 
 def main(argv):

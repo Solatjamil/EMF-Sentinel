@@ -228,6 +228,12 @@ jobs:
       - name: Checkout this branch
         uses: actions/checkout@v4
 
+      - name: Checkout the baseline commit (the app before this change) for the same emulator walk-through
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASELINE_SHA }}
+          path: baseline
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -250,6 +256,7 @@ jobs:
           keytool -genkeypair -keystore "$GITHUB_WORKSPACE/debug.keystore" -alias androiddebugkey \
             -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android \
             -dname "CN=Android Debug,O=Android,C=US"
+          cp "$GITHUB_WORKSPACE/debug.keystore" "$GITHUB_WORKSPACE/baseline/debug.keystore"
 
       - name: Enable KVM for the emulator
         run: |
@@ -267,6 +274,9 @@ jobs:
 
       - name: "Build the plain (no R8) debug APK to tell R8 effects from everything else"
         run: bash .github/ci/run_step.sh smoke_build_debug gradle gradle --no-daemon :app:assembleDebug
+
+      - name: "Build the pre-change (baseline) DEBUG APK for the same emulator walk-through"
+        run: bash .github/ci/run_step.sh smoke_build_baseline gradle gradle --no-daemon -p baseline :app:assembleDebug
 
       - name: Emulator smoke test
         id: emulator
@@ -289,3 +299,7 @@ jobs:
       - name: "Smoke digest: plain debug build"
         if: always()
         run: python3 .github/ci/digest.py smoke "API ${{ matrix.api }} debug" "$LOGS/smoke/debug"
+
+      - name: "Smoke digest: pre-change (baseline) debug build"
+        if: always()
+        run: python3 .github/ci/digest.py smoke "API ${{ matrix.api }} baseline-debug" "$LOGS/smoke/baseline"

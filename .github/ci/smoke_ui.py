@@ -47,6 +47,26 @@ def parse(path):
     return nodes
 
 
+SYSTEM_DIALOG = re.compile(r"(?i)isn't responding|keeps stopping|has stopped|not responding")
+
+
+def clear_system_dialog(nodes):
+    """An emulator on a shared CI runner sometimes shows "Pixel Launcher isn't responding". That is not the app,
+    but it covers it: tap "Wait" (or OK) so the walk-through can continue. True when something was tapped."""
+    sysn = [n for n in nodes if n["pkg"] == "android" or n["pkg"].startswith("com.android.systemui")]
+    if not any(SYSTEM_DIALOG.search(label(n)) for n in sysn):
+        return False
+    for wanted in ("Wait", "OK", "Close app"):
+        btn = [n for n in sysn if label(n).strip() == wanted]
+        if btn:
+            say("  (system dialog on top: %s -> tapping '%s')" % (
+                [label(n)[:50] for n in sysn if SYSTEM_DIALOG.search(label(n))][:1], wanted))
+            tap(btn[0])
+            time.sleep(2)
+            return True
+    return False
+
+
 def dump(name):
     """uiautomator dump -> node list, or None. Retries: a screen that keeps animating can fail to idle."""
     path = os.path.join(OUT, "ui_%s.xml" % name)
@@ -56,7 +76,10 @@ def dump(name):
         rc2, _ = adb("pull", "/sdcard/ui_dump.xml", path)
         if rc2 == 0 and os.path.exists(path) and os.path.getsize(path) > 0:
             try:
-                return parse(path)
+                parsed = parse(path)
+                if attempt < 4 and clear_system_dialog(parsed):
+                    continue
+                return parsed
             except ET.ParseError as exc:
                 say("  (parse error in %s: %s)" % (name, exc))
         else:
@@ -153,6 +176,96 @@ def camera_evidence():
     say("  camera service (dumpsys media.camera): %s" % ("; ".join(k[:110] for k in keep[:6]) or "no matching lines"))
 
 
+def app_windows():
+    """The app's windows from 'dumpsys window windows': the activity window plus everything hanging off it
+    (dialogs, popups, ad / consent WebView hosts)."""
+    _, out = adb("shell", "dumpsys", "window", "windows")
+    wins, cur = [], None
+    for line in out.splitlines():
+        m = re.match(r"\s*Window #(\d+) Window\{(\w+) u\d+ ([^}]*)\}:", line)
+        if m:
+            cur = {"n": m.group(1), "id": m.group(2), "title": m.group(3)} if PKG in m.group(3) else None
+            if cur is not None:
+                wins.append(cur)
+            continue
+        if cur is None:
+            continue
+        t = line.strip()
+        if t.startswith("mAttrs="):
+            cur["attrs"] = t.split(" fmt=")[0][:150]
+        elif t.startswith("Requested w="):
+            cur["req"] = " ".join(t.split()[1:3])
+        elif t.startswith("mBaseLayer="):
+            cur["layer"] = " ".join(t.split()[:2])
+        elif t.startswith("mAttachedWindow="):
+            cur["attached"] = t[:60]
+        elif t.startswith("mViewVisibility="):
+            cur["vis"] = t.split()[0]
+        elif t.startswith("mHasSurface="):
+            cur["surf"] = " ".join(w for w in t.split() if w.startswith(("mHasSurface", "isReadyForDisplay")))
+        elif t.startswith("Frames:"):
+            m2 = re.search(r"\bframe=(\[[^\]]*\]\[[^\]]*\])", t)
+            cur["frame"] = m2.group(1) if m2 else "?"
+    return wins
+
+
+def window_report(tag):
+    wins = app_windows()
+    say("  [windows %s] %d window(s) belong to the app:" % (tag, len(wins)))
+    for w in wins:
+        say("    #%s %s  %s  %s  frame=%s  %s  %s%s" % (
+            w.get("n"), w.get("id"), w.get("attrs", "?"), w.get("req", ""), w.get("frame", "?"),
+            w.get("vis", ""), w.get("surf", ""), ("  " + w["attached"]) if "attached" in w else ""))
+
+
+def input_windows_at(x, y, limit=3):
+    """Top-to-bottom: which input windows contain the point, i.e. who would receive a tap there."""
+    _, out = adb("shell", "dumpsys", "input")
+    hits = []
+    for line in out.splitlines():
+        m = re.search(r"name='([^']*)'.*?frame=\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", line)
+        if not m:
+            continue
+        name = m.group(1)
+        l, t, r, b = (int(v) for v in m.groups()[1:])
+        if l <= x < r and t <= y < b:
+            hits.append("%s frame=[%d,%d][%d,%d]" % (name[-80:], l, t, r, b))
+    return hits[:limit]
+
+
+def view_roots():
+    """Root views of every window of the top activity (class names only) - tells what a stray window contains."""
+    _, out = adb("shell", "dumpsys", "activity", "top")
+    lines = out.splitlines()
+    try:
+        start = next(i for i, l in enumerate(lines) if l.strip() == "View Hierarchy:")
+    except StopIteration:
+        say("  view roots: no 'View Hierarchy:' section in dumpsys activity top")
+        return
+    body = lines[start + 1:]
+    if not body:
+        return
+    base = len(body[0]) - len(body[0].lstrip())
+    roots = []
+    for i, l in enumerate(body):
+        ind = len(l) - len(l.lstrip())
+        if l.strip() and ind < base:
+            break
+        if l.strip() and ind == base:
+            roots.append(i)
+    say("  view roots of the top activity: %d" % len(roots))
+    for r in roots[:6]:
+        say("    root " + body[r].strip()[:130])
+        shown = 0
+        for l in body[r + 1: r + 12]:
+            ind = len(l) - len(l.lstrip())
+            if ind <= base:
+                break
+            if ind == base + 2 and shown < 3:
+                say("        " + l.strip()[:120])
+                shown += 1
+
+
 def visit(tab, width, height, dpi):
     say("")
     say("=== tab: %s ===" % tab)
@@ -220,9 +333,25 @@ def any_texts(nodes, limit=20):
     return rows[:limit]
 
 
+def crash_blocks():
+    """(app, other): FATAL EXCEPTION / Fatal signal headers in the crash buffer, split by whether the block names
+    the app. The uiautomator tool process and system processes can crash too - that is not the app."""
+    _, out = adb("logcat", "-b", "crash", "-d", "-v", "threadtime")
+    lines = out.splitlines()
+    _, pidout = adb("shell", "pidof", PKG)
+    pid = pidout.strip().split()[0] if pidout.strip() else ""
+    mine, other = [], []
+    heads = [i for i, l in enumerate(lines) if "FATAL EXCEPTION" in l or "Fatal signal" in l]
+    for i in heads:
+        later = [j for j in heads if j > i]
+        ctx = " ".join(lines[i: min(i + 4, later[0] if later else i + 4)])   # never into the next block
+        named = PKG in ctx or (pid and re.search(r"(?:PID: |pid |tid )%s\b" % re.escape(pid), ctx))
+        (mine if named else other).append(lines[i].strip()[:160])
+    return mine, other
+
+
 def crash_lines():
-    _, out = adb("logcat", "-b", "crash", "-d", "-v", "brief")
-    return [l for l in out.splitlines() if "FATAL EXCEPTION" in l or "Fatal signal" in l]
+    return crash_blocks()[0]
 
 
 def alive():
@@ -231,9 +360,11 @@ def alive():
 
 
 def checkpoint(name):
-    ok_alive, fatal = alive(), crash_lines()
-    say("  checkpoint %-26s process alive=%s   fatal lines in crash buffer=%d" % (name, ok_alive, len(fatal)))
-    return ok_alive and not fatal
+    ok_alive = alive()
+    mine, other = crash_blocks()
+    say("  checkpoint %-26s process alive=%s   app crashes in crash buffer=%d   (other processes: %d)" % (
+        name, ok_alive, len(mine), len(other)))
+    return ok_alive and not mine
 
 
 def exercise(width, height, dpi):
@@ -253,7 +384,10 @@ def exercise(width, height, dpi):
         time.sleep(8 if tab == "AR Scan" else 3)                    # CameraX needs a moment to bind
         after = dump("x_" + tab.lower().replace(" ", "_"))
         if after is not None and page_sig(after) == before:          # the tap did not navigate: aim above the label
-            say("  (%s: screen unchanged after the first tap, trying again above the label)" % tab)
+            say("  (%s: screen unchanged after the first tap at (%d,%d); input windows there, top first: %s)" % (
+                tab, (target["l"] + target["r"]) // 2, (target["t"] + target["b"]) // 2,
+                input_windows_at((target["l"] + target["r"]) // 2, (target["t"] + target["b"]) // 2) or "(not parseable)"))
+            window_report("when the tap did not navigate")
             lab = find_label(nodes, tab)
             if lab is not None:
                 adb("shell", "input", "tap", str((lab["l"] + lab["r"]) // 2), str(lab["t"] - 70))
@@ -316,6 +450,7 @@ def main():
         adb("shell", "monkey", "-p", PKG, "-c", "android.intent.category.LAUNCHER", "1")
         time.sleep(8)
         nodes = dump("scanner_retry%d" % attempt) or nodes
+    window_report("right after launch")
     rows = texts(nodes, 30)
     say("first screen after launch: %d app nodes, top of the list:" % len(app_nodes(nodes)))
     for row in rows:
@@ -326,7 +461,10 @@ def main():
     say("possible dialog / consent text on the first screen: %s" % (blockers[:6] or "none"))
     for tab in ("Insights", "Health"):
         visit(tab, width, height, dpi)
+    window_report("after visiting Insights and Health")
+    view_roots()
     exercise(width, height, dpi)
+    window_report("at the end")
 
 
 if __name__ == "__main__":

@@ -6,9 +6,11 @@
 # never be requested from CI):
 #   release = the R8-minified release build  (what ships to Play)
 #   debug   = the same code without R8       (tells R8 effects from everything else)
+#   baseline = the app BEFORE this change (commit 72eed5c), plain debug build: the reference for anything
+#              odd seen on screen (is it new, or was it already there?)
 # For each: install, launch, watch the process, drive the UI to the Insights and Health tabs where
-# the native ad lives, and record logcat / crash buffer / exit reasons / window-inset facts for
-# digest.py to turn into annotations.
+# the native ad lives, walk the other screens, and record logcat / crash buffer / exit reasons /
+# window facts for digest.py to turn into annotations.
 set -u
 PKG=com.goshbuzz.emfsentinel
 BASE="${LOGS:-/tmp/ci-logs}/smoke"
@@ -20,6 +22,10 @@ for i in $(seq 1 60); do
   [ "$(adb shell getprop sys.boot_completed | tr -d '\r')" = "1" ] && break
   sleep 2
 done
+
+# A loaded emulator on a shared runner sometimes ANRs the launcher; its dialog would cover the app and is not
+# the app's business. (Crashes and ANRs are still detected from the crash buffer, pids and exit info.)
+adb shell settings put global hide_error_dialogs 1 2>/dev/null
 
 unlock_screen() {
   adb shell svc power stayon true 2>/dev/null
@@ -82,4 +88,5 @@ run_case() {  # <label> <apk>
 
 run_case release app/build/outputs/apk/release/app-release.apk
 run_case debug   app/build/outputs/apk/debug/app-debug.apk
+run_case baseline baseline/app/build/outputs/apk/debug/app-debug.apk
 echo "smoke.sh finished"
