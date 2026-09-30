@@ -2,11 +2,13 @@
 
 Date: 2026-09-12 · app: `com.goshbuzz.emfsentinel` (EMF Sentinel, GoshBuzz)
 
-**Updated 2026-09-30 — Play Console recommendations for release `3.3 (6)` + AdMob native ad:
+**Updated 2026-10-01 — Play Console recommendations for release `3.3 (6)` + AdMob native ad:
 see [§F](#f-play-console-recommendations-for-release-33-6--admob-native-ad).** Those changes were
-compiled, unit-tested, R8-built and smoke-tested on emulators in CI (see the verification log at the
-bottom). **The emulator test found a launch crash in the first R8 build** (§F.6); the one-line fix is in
-this tree, and the last row of the verification log says whether it has been re-verified yet.
+compiled, unit-tested, R8-built and smoke-tested on Android 15 and 16 emulators in CI (see the
+verification log at the bottom). **The emulator test found a launch crash in the first R8 build**
+(§F.6); the one-line fix is in this tree and the minified build now launches and runs. Still open: a real
+device, the production ad unit, Play Console's reaction, and one unexplained emulator observation (last
+rows of the log).
 
 ---
 
@@ -187,8 +189,9 @@ No Gemini/Firebase call existed anywhere in the code; all AI scaffolding has bee
 ```
 
 **Verified in this workspace:** see “Build verification log” at the bottom of this file.
-**Not verified here (needs a device/emulator):** actual ad rendering, UMP form display,
-sensor reads, LAN sweep reachability, camera torch.
+**Not verified (needs a real device):** the UMP consent *form* in a GDPR region, sensor reads,
+LAN sweep reachability, camera torch. (Test-ad rendering — banner and native — was later seen on
+emulators; see the log.)
 
 ---
 
@@ -223,6 +226,10 @@ sensor reads, LAN sweep reachability, camera torch.
    - Consent denied / withdrawn → no native request is made (and a visible card disappears).
    - Toggle dark/light, switch tabs quickly, rotate, background/foreground the app: no crash,
      card colours follow the theme, the banner keeps working underneath.
+   - Scroll **Health** and **Insights** until the card is partly behind the bottom bar, then tap
+     every bottom-bar item: each tap must navigate. (In the CI run on an Android 15 *debug*
+     emulator the taps were swallowed by a stray second window of the app; cause not identified —
+     see the last rows of the verification log.)
 9. **Edge-to-edge** — test on an **Android 15/16** device/emulator *and* on an Android 10–14 one:
    - Gesture navigation **and** 3-button navigation; portrait **and** landscape; a device or
      emulator with a **display cutout**.
@@ -235,7 +242,11 @@ sensor reads, LAN sweep reachability, camera torch.
     Health, Settings, Floor-Plan Mapper (draw/save/reload), LAN scan, consent form. Any crash that
     does not happen in debug points at a missing R8 keep rule (see `app/proguard-rules.pro`). This is not
     hypothetical: the first R8 build crashed at launch (WorkManager/Room, §F.6) and only the emulator run of
-    the release build showed it.
+    the release build showed it. The CI emulator walk (log below) already covered Scanner, Heatmap,
+    Insights, Health, Settings and the theme toggle on API 35 + 36 and the AR tab (CameraX opens the
+    camera) on API 35 with the minified build; what only a person can still judge is the camera
+    permission prompt and live preview, Floor-Plan Mapper (draw/save/reload), LAN scan, and the consent
+    form in a GDPR region.
 
 ---
 
@@ -409,6 +420,9 @@ debug builds do not run R8, so unit tests and debug installs stay green.
   `ClassNotFoundException`. Public reports show the same crash in other ads/Firebase apps (for example
   `BirdoVPN/Mobile-Client#438`, `Oasis-Forge/wasfati#35`).
 - **Fix:** `-keep class * extends androidx.room.RoomDatabase { <init>(); }` in `app/proguard-rules.pro`.
+- **Re-verified:** with the rule, R8's output keeps `androidx.work.impl.WorkDatabase_Impl()` (it is listed in
+  `seeds.txt`), and the same minified build launches on the Android 15 and 16 emulators and survives a walk
+  through the screens — details in the verification log.
 - **Do not skip:** install and launch the minified release build before every upload (checklist D.10). If a
   further R8 problem ever shows up and cannot be fixed quickly, `isMinifyEnabled = false` restores the 3.3
   behaviour — the price is that the Play “deprecated edge-to-edge APIs” item will very likely stay.
@@ -443,7 +457,9 @@ workflow did the building, testing and scanning on a clean Ubuntu runner: JDK 21
 AGP 9.1.1, compileSdk 36.1, throw-away signing keys (never the repository's upload key), emulators
 Android 15 (API 35) and Android 16 (API 36), x86_64. The same checks ran on the pre-change commit
 (`72eed5c`, “baseline”) so that pre-existing problems can be told apart from new ones. The workflow and its
-scripts are removed again before this branch is finalised.
+scripts were removed again in the last commit of this branch (they stay in its history: `git log -- .github`).
+Only annotation text could be read back from that CI, not raw logs or artifacts, so the results below are what
+the digests reported.
 
 | Check | Result |
 |---|---|
@@ -457,9 +473,12 @@ scripts are removed again before this branch is finalised.
 | DEX scan for Play's deprecated edge-to-edge APIs | ✅ **13 → 2** flagged references, the 2 left are inside Google's ads SDK (§F.3 table) |
 | R8 removed the unused `androidx.activity.EdgeToEdge*` shims | ✅ all 9 classes |
 | Full lint (release) | 1 **pre-existing** error (`CAMERA` permission without `<uses-feature android:name="android.hardware.camera" android:required="false">`, `PermissionImpliesUnsupportedChromeOsHardware`) + 78 warnings, mostly “newer dependency available”. No Play SDK Index (`OutdatedLibrary`/`RiskyLibrary`), `NewApi` or deprecated-API finding. Two style warnings in the new `NativeAdCard.kt` (`ViewConstructor`, `SetTextI18n`) were fixed (suppression + `native_ad_badge` string) |
-| Emulator, **debug** build, API 35 + 36 | ✅ stays alive; UMP reaches `canRequestAds=true` (also on the US-state path, `privacyOptionsRequired=true`); the test banner loads; the window spans the whole display with `layoutInDisplayCutoutMode=always` (window dump read on API 36); on both the header starts below the status bar (y = 160 px vs. a 128 px bar). The **native test ad did not load**: `Incorrect native ad response. Click actions were not properly specified` (error 0) is a documented emulator limitation — Google's demo native creatives need the Play Store and that emulator image had none — and the card correctly rendered *nothing* (no gap, no crash). **Native ad rendering is therefore still unverified** |
-| Emulator, **R8 release** build, API 35 + 36 | ❌ **crashed at launch** (WorkManager → Room, §F.6). **Fix written (one keep rule); re-verification of the fix is PENDING** — the CI run that confirms it was blocked by an expired GitHub token |
-| On a real device: ads render, insets on Android 10–16, every screen of the release build | ⚪ NOT RUN — QA checklist D |
+| Emulator (Android 15 + 16, Play-Store image), **R8 release** build — launch | first run ❌ **crashed at launch** (WorkManager → Room, §F.6). With the keep rule ✅ on both API levels: one process id from 3 s to the end of the test (checked at 3 / 8 / 18 / 33 s and at the end), crash buffer empty, no exit-info records; `WorkDatabase_Impl()` is a kept seed in R8's output. The APK is the real `release` build type with only the three AdMob id constants replaced by Google's demo ids (Gradle `-P`), so CI never requested live ads |
+| … same build — walk-through | ✅ Scanner, Heatmap, Insights, Health, the Settings dialog and the theme toggle (×2) on API 35 + 36: process alive and no app crash after every step. **AR Scan** (the most reflection-sensitive screen — CameraX loads its default config by class name): ✅ entered on API 35; CameraX initialised, `Camera2CameraImpl` went OPENING → OPENED and the camera service listed the app as the client. Not exercised on API 36 (a system “Pixel Launcher isn't responding” dialog covered the app in the run that tried; the APK is identical on both API levels, so a missing keep rule would have shown on API 35 as well). On API 35 the only crash-buffer entry during that walk came from the test tool's own `uiautomator` process (pid 4538), not from the app (pid 2993) |
+| … same build and the plain **debug** build — ads | ✅ UMP reaches `canRequestAds=true` (also on the US-state path, `privacyOptionsRequired=true`); the banner loads; **the native test ad loads and renders** on Insights and Health (`NativeAdCard: Native ad loaded`): “Ad” badge 24.4 × 17.9 dp, headline, rating, media area 343 × 193 dp (demo *video* unit in the release run, demo *image* unit in debug, where a real `NativeAdView` + `MediaView` are in the activity's view hierarchy). The first run used an emulator image *without* the Play Store, where Google's demo native creative fails with `Incorrect native ad response. Click actions were not properly specified` (error 0); the card correctly rendered nothing then (no gap, no crash), which also exercised the failure path |
+| Edge-to-edge on the emulator (debug build, API 35 + 36) | ✅ the window spans the whole display with `layoutInDisplayCutoutMode=always` (window dump read on API 36); on both, the header starts below the status bar (y = 160 px vs. a 128 px bar) |
+| ⚠ **Open observation** — plain debug build, API 35 only | After visiting Insights and Health, taps on the bottom-bar items did not navigate (seen in two runs). The app then owned a *visible* second window (`ty=APPLICATION`, 840 × 406 px at 52,1903, i.e. over the bar). The same two wrap-content windows exist — invisible, 840 × 0 px — in every other configuration: API 36 debug and both R8 builds navigated normally. **Not identified**: the app's only windows are Compose/Material dialogs that open on user actions; my unverified guess is a WebView window of the ads / consent SDKs. **Not compared with the pre-change app.** Checklist D.8 has a manual step for it |
+| On a real device: the **production** native unit serving (a new unit can take about an hour to start filling), live camera preview, insets on Android 10–16 with gesture vs. 3-button navigation, consent form in a GDPR region, Floor-Plan Mapper and LAN scan in the release build | ⚪ NOT RUN — QA checklist D |
 | Play Console: which warnings clear | ⚪ only visible after uploading `3.4 (7)` |
 
 Run on a workstation **before uploading**:
