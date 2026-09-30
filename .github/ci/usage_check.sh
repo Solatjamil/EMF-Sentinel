@@ -14,6 +14,12 @@ echo "--- androidx.activity.EdgeToEdge* classes KEPT (mapping.txt)"
 grep -E '^androidx\.activity\.EdgeToEdge[A-Za-z0-9_$]* -> ' "$D/mapping.txt" 2>/dev/null | head -30
 echo
 echo "--- enableEdgeToEdge mentions in mapping.txt: $(count enableEdgeToEdge "$D/mapping.txt")"
+echo
+echo "--- Room/WorkManager: is the reflectively-created WorkDatabase_Impl constructor kept? (first R8 build crashed here)"
+echo "seeds.txt lines for WorkDatabase_Impl:"; grep -n "WorkDatabase_Impl" "$D/seeds.txt" 2>/dev/null | head -5
+echo "mapping.txt: class + <init> entries for WorkDatabase_Impl:"
+grep -n -A6 '^androidx\.work\.impl\.WorkDatabase_Impl -> ' "$D/mapping.txt" 2>/dev/null | grep -E "WorkDatabase_Impl|<init>" | head -6
+echo "keep rule present in R8's final configuration:"; grep -n "RoomDatabase" "$D/configuration.txt" 2>/dev/null | head -6
 echo "--- this app's helper classes kept by R8:"
 grep -E '^com\.example\.(ui\.EdgeToEdgeKt|ads\.NativeAdCard)' "$D/mapping.txt" 2>/dev/null | head -10
 echo

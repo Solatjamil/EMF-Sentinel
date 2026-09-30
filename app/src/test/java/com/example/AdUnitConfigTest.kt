@@ -4,11 +4,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Guards an AdMob policy: development builds (debug, qa) must only ever carry Google's DEMO ad
- * units — clicking your own live ads can get an AdMob account suspended — while release builds
- * must carry well-formed production unit IDs (see app/build.gradle.kts).
+ * Guards an AdMob policy: development builds must only ever carry Google's DEMO ad units — clicking
+ * your own live ads can get an AdMob account suspended — while a release build must carry well-formed
+ * production unit IDs (see app/build.gradle.kts).
  *
- * Plain JVM test: it only reads the generated BuildConfig of whichever variant is under test.
+ * Plain JVM test: it only reads the generated BuildConfig of the variant under test. AGP 9 creates
+ * unit-test tasks for the debug build type only, so in practice this runs as `testDebugUnitTest`;
+ * the qa/release IDs were checked against their generated BuildConfig classes in CI
+ * (docs/IMPLEMENTATION_NOTES.md, verification log). The logic is variant-agnostic and starts covering
+ * qa/release automatically if `android.onlyEnableUnitTestForTheTestedBuildType=false` is ever set.
  */
 class AdUnitConfigTest {
 

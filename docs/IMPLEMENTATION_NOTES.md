@@ -3,8 +3,10 @@
 Date: 2026-09-12 · app: `com.goshbuzz.emfsentinel` (EMF Sentinel, GoshBuzz)
 
 **Updated 2026-09-30 — Play Console recommendations for release `3.3 (6)` + AdMob native ad:
-see [§F](#f-play-console-recommendations-for-release-33-6--admob-native-ad).** Those changes
-were written and statically reviewed but **not compiled** (see the verification log).
+see [§F](#f-play-console-recommendations-for-release-33-6--admob-native-ad).** Those changes were
+compiled, unit-tested, R8-built and smoke-tested on emulators in CI (see the verification log at the
+bottom). **The emulator test found a launch crash in the first R8 build** (§F.6); the one-line fix is in
+this tree, and the last row of the verification log says whether it has been re-verified yet.
 
 ---
 
@@ -173,7 +175,12 @@ No Gemini/Firebase call existed anywhere in the code; all AI scaffolding has bee
 ## C. Build / run instructions + verification status
 
 ```bash
-# Prereqs: JDK 17, Android SDK platform-36 + build-tools 36, sdk.dir in local.properties
+# Prereqs: JDK 21 (AGP needs 17+, but the Robolectric tests target SDK 36 and refuse to start below 21),
+#          Android SDK platform-36 + build-tools 36, sdk.dir in local.properties
+# The debug build type signs with ./debug.keystore, which is .gitignored, so a fresh clone cannot assemble
+# debug until you create it (pre-existing; left untouched):
+#   keytool -genkeypair -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android \
+#           -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
 ./gradlew :app:assembleDebug      # TEST ads (Google sample IDs)
 ./gradlew :app:assembleQa         # your App ID + TEST banner (validates UMP config)
 ./gradlew :app:assembleRelease    # production IDs — confirm in AdMob console first
@@ -226,7 +233,9 @@ sensor reads, LAN sweep reachability, camera torch.
 10. **Release build smoke test** (R8 is enabled for the first time in `3.4 (7)`): install the signed
     release build and walk every tab — Scanner, Heatmap, AR (camera permission + preview), Insights,
     Health, Settings, Floor-Plan Mapper (draw/save/reload), LAN scan, consent form. Any crash that
-    does not happen in debug points at a missing R8 keep rule (see `app/proguard-rules.pro`).
+    does not happen in debug points at a missing R8 keep rule (see `app/proguard-rules.pro`). This is not
+    hypothetical: the first R8 build crashed at launch (WorkManager/Room, §F.6) and only the emulator run of
+    the release build showed it.
 
 ---
 
@@ -277,8 +286,9 @@ Play Console flagged three items on `3.3 (6)`. Findings, fixes and how to verify
   1.2.0) are all already exceeded here, so it changes *only* fragment. The latest stable, 1.9.1,
   would additionally raise lifecycle to 2.10.0 (+ tracing 2.0.0) in an app pinned to Compose BOM
   2024.09 — a larger, untested jump for no benefit to this warning.
-- **Verify:** `./gradlew :app:dependencyInsight --dependency androidx.fragment --configuration releaseRuntimeClasspath`
-  must show `androidx.fragment:fragment:1.8.9`.
+- **Verified (CI, `dependencyInsight` on `releaseRuntimeClasspath`):** before, `androidx.fragment:fragment:1.1.0`
+  (dependents: `appcompat:1.1.0` ← `camera-view:1.5.0`, and `play-services-basement:18.9.0`); now
+  `androidx.fragment:fragment:1.8.9` ("by conflict resolution between 1.8.9, 1.1.0 and 1.0.0").
 
 ### F.2 “Edge-to-edge may not display for all users”
 
@@ -327,20 +337,33 @@ the exact callers could not be read — but the evidence is consistent:
   2. **R8 is now enabled for release** (`isMinifyEnabled` + `isShrinkResources`). Before, the
      app shipped *every* library class, so the now-unused `EdgeToEdgeApi*` shims would still have been
      in the DEX (and flagged). R8 strips them.
-- **Verify** after `./gradlew :app:bundleRelease`: R8's `app/build/outputs/mapping/release/usage.txt`
-  should list `androidx.activity.EdgeToEdgeApi…` (= removed) and `mapping.txt` should not contain them.
+- **Measured in CI** (`dexdump -d` of the final release APK, with R8's `mapping.txt` to name the owners):
+
+  | Flagged reference in the DEX | 3.3 build (R8 off) | this tree (R8 on) |
+  |---|---|---|
+  | `Window.setStatusBarColor` call sites | 4 (`EdgeToEdgeApi23/26/29`, `WindowCompat.enableEdgeToEdge`) | **0** |
+  | `Window.setNavigationBarColor` call sites | 4 (same four) | **0** |
+  | cutout mode `SHORT_EDGES` writes | 4 (`EdgeToEdgeApi28`, `WindowCompat.enableEdgeToEdge`, ads `zzm.zzj`, `HsdpShimActivity.onCreate`) | 1 (ads SDK `zzm.zzj` + `HsdpShimActivity.onCreate`, merged into one R8 outline) |
+  | cutout mode `NEVER` writes | 1 (ads `zzx.zzl`) | 1, value now passed as a parameter (still ads `zzx.zzl`) |
+  | cutout mode `ALWAYS` (the recommended value; not flagged) | 1 (`EdgeToEdgeApi30`) | 1 (this app's `MainActivity`) |
+  | **Play-relevant total** | **13** | **2 — both inside Google's ads SDK** |
+
+  R8 removed all nine `androidx.activity.EdgeToEdge*` classes (they are listed in `usage.txt` and absent
+  from `mapping.txt`); APK size fell from 13.0 MB to 4.5 MB.
 - **Judgement call — theme attributes:** `android:statusBarColor` / `android:navigationBarColor` in
   `themes.xml` are *themselves* on Android 15's deprecated list (ignored there). They are kept because the
   alternative is a code call that Play definitely flags, and every Play report examined so far lists code
   references only. If a future report names them as “parameters”, delete those two `<item>` lines: Android
   7–14 then shows the platform's default opaque bars (Android 15+ is unaffected — it ignores them anyway).
-- **What may remain (outside this repo):** a public report on `play-services-ads` 25.4.0
-  (`cph5236/HeapGame#167`) traced a leftover `SHORT_EDGES` flag to the ads SDK's own overlay code /
-  its `hsdp` dependency. If Play's new list only names `com.google.android.gms.ads.*` (or
-  `com.google.android.play…`), that is the Google ads SDK: nothing in this app can remove it, and it
-  is not a reason to hold the release. `play-services-ads` 25.5.0 (17 Sep 2026) has an identical
-  dependency set and its notes mention no edge-to-edge change, so the SDK was deliberately **not**
-  bumped in this change.
+- **What remains (outside this repo) — now measured, no longer a guess:** the only flagged-parameter writes
+  left in the DEX are `layoutInDisplayCutoutMode = SHORT_EDGES / NEVER`, and every one of them is in Google's
+  ads stack: `com.google.android.gms.ads.internal.overlay.zzm.zzj` (the full-screen ad activity),
+  `com.google.android.gms.ads.internal.util.zzx.zzl`, and `com.google.android.play.core.hsdp.service.HsdpShimActivity.onCreate`
+  (declared by the `hsdp` library that `play-services-ads` brings in). Nothing from this app or from AndroidX is
+  left. If Play's new “These start in the following places” list names only `com.google.android.gms.ads.*` /
+  `com.google.android.play…`, that is the ads SDK: it cannot be fixed here and is not a reason to hold the
+  release. `play-services-ads` 25.5.0 (17 Sep 2026) has an identical dependency set and its notes mention no
+  edge-to-edge change, so the SDK was deliberately **not** bumped.
 
 ### F.4 AdMob Native ad — policy mapping
 
@@ -370,6 +393,26 @@ The banner (`AnchoredAdaptiveBanner`) is untouched and keeps its own slot under 
 Play holds `3.3 (6)`; the repo said `3 / 3.0`, so an upload built from it would be rejected as a lower
 version code. `app/build.gradle.kts` is now **`versionCode 7` / `versionName "3.4"`**.
 
+### F.6 R8 launch crash found by the emulator smoke test — and its fix
+
+Turning R8 on (needed for §F.3) is what exposed this, and **only a run of the release build can expose it**:
+debug builds do not run R8, so unit tests and debug installs stay green.
+
+- **Symptom** (Android 15 and 16 emulators, identical): the release build dies while the process starts, before
+  any activity exists:
+  `RuntimeException: Unable to get provider androidx.startup.InitializationProvider` ←
+  `Failed to create an instance of androidx.work.impl.WorkDatabase` (`WorkManagerInitializer`).
+- **Cause:** `play-services-ads` pulls in WorkManager, WorkManager pulls in Room, and Room creates its generated
+  `WorkDatabase_Impl` by reflection. The `room-runtime` on this classpath only declares
+  `-keep class * extends androidx.room.RoomDatabase` (no members), so under R8 full mode the reflection-only
+  no-arg constructor is removed. The class name survives, hence an `InstantiationException` instead of a
+  `ClassNotFoundException`. Public reports show the same crash in other ads/Firebase apps (for example
+  `BirdoVPN/Mobile-Client#438`, `Oasis-Forge/wasfati#35`).
+- **Fix:** `-keep class * extends androidx.room.RoomDatabase { <init>(); }` in `app/proguard-rules.pro`.
+- **Do not skip:** install and launch the minified release build before every upload (checklist D.10). If a
+  further R8 problem ever shows up and cannot be fixed quickly, `isMinifyEnabled = false` restores the 3.3
+  behaviour — the price is that the Play “deprecated edge-to-edge APIs” item will very likely stay.
+
 ---
 
 ## Build verification log
@@ -393,27 +436,37 @@ Environment notes: the template's `-Xmx4g` daemon default OOM-killed builds on a
 box; `gradle.properties` now caps at `-Xmx1280m` and debug skips PNG crunch (matching
 the existing release setting). Full cold-cache QA build ≈ 11 min here; warm builds ≈ 40 s. Post-cleanup warm re-verification: debug 53 s, QA 35 s — all green, APKs ~2.7 MB smaller each. Additionally verified end-to-end: `:app:assembleRelease` signed via env-var keystore (scratch key, 12.4 MB) — release merged manifest carries production App ID; aapt badging: com.goshbuzz.emfsentinel v3.0(3), minSdk 24 / targetSdk 36; `:app:testDebugUnitTest` executes green (JUnit4: 1 test, 0 failures). (Robolectric/roborazzi runtime classes still to run on your workstation.)
 
-### 2026-09-30 — Play recommendations + native ad (§F) — NOT COMPILED
+### 2026-09-30 / 10-01 — Play recommendations + native ad (§F) — verified on GitHub Actions
 
-This session's authoring environment had **no JDK, Gradle, Android SDK or network access for shell
-commands**, so **none of the §F changes have been built, run or tested**. What was checked instead:
+Nothing could be compiled in the authoring sandbox (no JDK / Android SDK), so a **temporary** GitHub Actions
+workflow did the building, testing and scanning on a clean Ubuntu runner: JDK 21 (Temurin), Gradle 9.7.1,
+AGP 9.1.1, compileSdk 36.1, throw-away signing keys (never the repository's upload key), emulators
+Android 15 (API 35) and Android 16 (API 36), x86_64. The same checks ran on the pre-change commit
+(`72eed5c`, “baseline”) so that pre-existing problems can be told apart from new ones. The workflow and its
+scripts are removed again before this branch is finalised.
 
 | Check | Result |
 |---|---|
-| Dependency graph from the Google Maven POMs (`play-services-ads` 25.4.0/25.5.0, `ads-api`, `basement` 18.9.0, `ump` 4.0.0, `camera-view` 1.5.0, `fragment` 1.8.9/1.9.1, `compose-bom` 2024.09.00) | ✅ fragment 1.1.0 traced to `basement` + `camera-view`; 1.8.9 needs nothing newer than is already resolved |
-| API names vs. the official references (`NativeAdView`, `NativeAd`, `NativeAdOptions`, `WindowInsetsSides`) and the `androidx.core` `WindowCompat` source | ✅ — and one trap avoided: `WindowInsetsSides.plus` is public only from Compose foundation 1.10 (this project resolves 1.7.0), so it is not used |
-| Bracket/structure check of every touched Kotlin file (script) | ✅ balanced |
-| New plain-JVM test `AdUnitConfigTest` (debug/qa must carry Google demo banner + native units; release IDs well-formed) | ⚪ written, **NOT RUN** |
-| `:app:compileDebugKotlin`, `assembleDebug/Qa/Release`, `testDebugUnitTest`, lint | ⚪ **NOT RUN** |
-| On-device: ads render, insets on Android 10–16, R8 release run | ⚪ **NOT RUN** |
+| `:app:assembleDebug` | ✅ (needs `debug.keystore`, see §C — pre-existing) |
+| `:app:testDebugUnitTest` (JDK 21) | ✅ **4/4**: `AdUnitConfigTest` (new), `ExampleUnitTest`, `ExampleRobolectricTest`, `GreetingScreenshotTest`. Baseline: 3/3. With JDK 17 both Robolectric tests fail on baseline *and* branch (“Android SDK 36 requires Java 21”) — a JDK matter, not a regression |
+| Unit tests for `qa` / `release` | n/a — AGP 9 creates only `testDebugUnitTest` here. The per-variant ad IDs were checked on the generated `BuildConfig` instead (next rows) |
+| Generated `BuildConfig` | ✅ debug: Google demo app/banner/native; qa: your App ID + demo banner/native; **release: App ID `ca-app-pub-4067724379997931~6208950543`, banner `…/4082502150`, native `…/9411043977`** (exactly as supplied); all `versionCode 7` / `"3.4"` |
+| `:app:assembleRelease` (R8 + shrinkResources + lint-vital) | ✅ APK 13.0 MB → **4.5 MB**; `aapt2` shows `com.goshbuzz.emfsentinel` 7 / 3.4, minSdk 24, targetSdk 36 and the production AdMob App ID in the packaged manifest |
+| `:app:bundleRelease` | ✅ 8.7 MB; embeds `BUNDLE-METADATA/…/proguard.map` (Play can de-obfuscate crash reports automatically) |
+| `androidx.fragment` | ✅ 1.1.0 → **1.8.9** (§F.1) |
+| DEX scan for Play's deprecated edge-to-edge APIs | ✅ **13 → 2** flagged references, the 2 left are inside Google's ads SDK (§F.3 table) |
+| R8 removed the unused `androidx.activity.EdgeToEdge*` shims | ✅ all 9 classes |
+| Full lint (release) | 1 **pre-existing** error (`CAMERA` permission without `<uses-feature android:name="android.hardware.camera" android:required="false">`, `PermissionImpliesUnsupportedChromeOsHardware`) + 78 warnings, mostly “newer dependency available”. No Play SDK Index (`OutdatedLibrary`/`RiskyLibrary`), `NewApi` or deprecated-API finding. Two style warnings in the new `NativeAdCard.kt` (`ViewConstructor`, `SetTextI18n`) were fixed (suppression + `native_ad_badge` string) |
+| Emulator, **debug** build, API 35 + 36 | ✅ stays alive; UMP reaches `canRequestAds=true` (also on the US-state path, `privacyOptionsRequired=true`); the test banner loads; the window spans the whole display with `layoutInDisplayCutoutMode=always`; the header starts below the status bar (y = 160 px vs. a 128 px bar). The **native test ad did not load**: `Incorrect native ad response. Click actions were not properly specified` (error 0) is a documented emulator limitation — Google's demo native creatives need the Play Store and that emulator image had none — and the card correctly rendered *nothing* (no gap, no crash). **Native ad rendering is therefore still unverified** |
+| Emulator, **R8 release** build, API 35 + 36 | ❌ **crashed at launch** (WorkManager → Room, §F.6). **Fix written (one keep rule); re-verification of the fix is PENDING** — the CI run that confirms it was blocked by an expired GitHub token |
+| On a real device: ads render, insets on Android 10–16, every screen of the release build | ⚪ NOT RUN — QA checklist D |
 | Play Console: which warnings clear | ⚪ only visible after uploading `3.4 (7)` |
 
 Run on a workstation **before uploading**:
 
 ```bash
-./gradlew :app:assembleDebug :app:assembleQa :app:testDebugUnitTest
+./gradlew :app:assembleDebug :app:testDebugUnitTest        # JDK 21
 ./gradlew :app:dependencyInsight --dependency androidx.fragment --configuration releaseRuntimeClasspath   # expect 1.8.9
-./gradlew :app:bundleRelease     # needs KEYSTORE_PATH / STORE_PASSWORD / KEY_PASSWORD; first R8 build of this app
-grep -c "EdgeToEdgeApi" app/build/outputs/mapping/release/usage.txt   # > 0  => shims were removed by R8
+./gradlew :app:bundleRelease        # needs KEYSTORE_PATH / STORE_PASSWORD / KEY_PASSWORD
+# then install the signed RELEASE build and launch it (R8!): checklist D.10
 ```
-Then run QA checklist items 8–10 on hardware.

@@ -274,7 +274,10 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api }}
-          target: google_apis
+          # google_apis_playstore, not google_apis: Google's demo NATIVE creatives are app-install ads whose
+          # click actions need the Play Store; without it the SDK answers "Incorrect native ad response.
+          # Click actions were not properly specified" (error 0) - seen on the first run.
+          target: google_apis_playstore
           arch: x86_64
           profile: pixel_6
           script: bash .github/ci/smoke.sh

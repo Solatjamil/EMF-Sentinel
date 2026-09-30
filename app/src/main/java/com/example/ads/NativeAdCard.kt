@@ -1,5 +1,6 @@
 package com.example.ads
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Outline
 import android.graphics.Typeface
@@ -26,6 +27,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import com.example.R
 import com.example.ui.theme.Amber500
 import com.example.ui.theme.Amber600
 import com.example.ui.theme.Emerald500
@@ -207,6 +209,7 @@ private class NativeAdViews(
 }
 
 /** FrameLayout that keeps a fixed aspect ratio (and a minimum height) for the MediaView. */
+@SuppressLint("ViewConstructor") // private, only ever constructed in code (never inflated from XML)
 private class AspectRatioFrameLayout(
     context: Context,
     private val aspectRatio: Float,
@@ -235,7 +238,7 @@ private fun createNativeAdView(context: Context): NativeAdView {
 
     // "Ad" attribution badge — rendered by the app, required by AdMob policy (min 15px).
     val badge = label(10f, bold = true).apply {
-        text = "Ad"
+        text = context.getString(R.string.native_ad_badge)
         gravity = Gravity.CENTER
         minWidth = px(24)
         minHeight = px(18)
