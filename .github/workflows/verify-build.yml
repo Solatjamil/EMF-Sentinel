@@ -1,12 +1,15 @@
-# TEMPORARY verification for this branch — removed again right after it has run.
+# TEMPORARY verification for this branch - removed again right after it has run.
 #
 # The authoring sandbox had no JDK / Android SDK, so the changes could not be compiled there.
 # GitHub-hosted runners have both, so this workflow does what could not be done locally:
-#   job "branch":   compile + unit tests + the real R8 release build + a scan of the final DEX
-#                   for the Android 15-deprecated window APIs that Play Console flags
-#   job "baseline": the same DEX scan for the code as it was before these changes (R8 off)
-# No secrets are used. Release signing uses a throw-away key created inside the job
-# (never the repository's upload key).
+#   job "branch":   compile, unit tests, the real R8 release build, a scan of the final DEX for the
+#                   Android 15-deprecated window APIs that Play Console flags, and full lint
+#   job "baseline": the same DEX scan + unit tests for the code as it was before these changes
+#   job "smoke":    the R8 release build (built with Google DEMO ad ids) launched on API 35 + 36
+#                   emulators: does it survive, does the native ad load, are insets applied?
+# No secrets are used. Release signing uses throw-away keys created inside the job (never the
+# repository's upload key). Every step reports through workflow annotations (.github/ci/digest.py)
+# because the authoring sandbox can read annotations but not raw logs or artifacts.
 name: verify-build
 
 on:
@@ -25,6 +28,7 @@ env:
   STORE_PASSWORD: ci-verify-pass
   KEY_PASSWORD: ci-verify-pass
   BASELINE_SHA: 72eed5ce1d0a938b715e5b5dff776f1fb887c339
+  LOGS: /tmp/ci-logs
 
 jobs:
   branch:
@@ -51,9 +55,9 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_HOME"
           ls "$ANDROID_HOME/platforms" "$ANDROID_HOME/build-tools" || true
 
-      - name: Prepare (Gradle heap, SDK licences, throw-away signing key)
+      - name: Prepare (Gradle heap, SDK licences, throw-away signing keys)
         run: |
-          mkdir -p ~/.gradle
+          mkdir -p ~/.gradle "$LOGS"
           echo "org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8" >> ~/.gradle/gradle.properties
           sudo chmod -R a+rwX "$ANDROID_HOME" || true
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
@@ -61,34 +65,51 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 3650 \
             -storepass "$STORE_PASSWORD" -keypass "$KEY_PASSWORD" -dname "CN=ci-verify"
           echo "KEYSTORE_PATH=$RUNNER_TEMP/ci-verify.jks" >> "$GITHUB_ENV"
+          # build.gradle.kts signs DEBUG builds with ./debug.keystore, which is .gitignored and so
+          # missing on every fresh checkout (pre-existing, untouched by this change).
+          keytool -genkeypair -keystore "$GITHUB_WORKSPACE/debug.keystore" -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US"
 
       - name: "1. Compile + assemble debug"
         id: debug
         continue-on-error: true
-        run: gradle --no-daemon --stacktrace :app:assembleDebug
+        run: bash .github/ci/run_step.sh debug gradle gradle --no-daemon --stacktrace :app:assembleDebug
 
-      - name: "2. Unit tests (debug) incl. the new AdUnitConfigTest"
+      - name: "2. Unit tests (debug), all of them"
         id: unit
         continue-on-error: true
-        run: gradle --no-daemon --stacktrace :app:testDebugUnitTest
+        run: bash .github/ci/run_step.sh unit gradle gradle --no-daemon :app:testDebugUnitTest
+
+      - name: "2b. JUnit results (debug)"
+        if: always()
+        run: python3 .github/ci/digest.py junit "debug" app/build/test-results/testDebugUnitTest
 
       - name: "3. AdUnitConfigTest on the qa + release variants (also compiles both)"
         id: variants
         continue-on-error: true
         run: >-
-          gradle --no-daemon --stacktrace
+          bash .github/ci/run_step.sh variants gradle
+          gradle --no-daemon --continue
           :app:testQaUnitTest --tests com.example.AdUnitConfigTest
           :app:testReleaseUnitTest --tests com.example.AdUnitConfigTest
+
+      - name: "3b. JUnit results (qa + release)"
+        if: always()
+        run: >-
+          python3 .github/ci/digest.py junit "qa+release"
+          app/build/test-results/testQaUnitTest app/build/test-results/testReleaseUnitTest
 
       - name: "4. Release build with R8 + resource shrinking (incl. lint-vital)"
         id: release
         continue-on-error: true
-        run: gradle --no-daemon --stacktrace :app:assembleRelease
+        run: bash .github/ci/run_step.sh release gradle gradle --no-daemon --stacktrace :app:assembleRelease
 
       - name: "5. Resolved androidx.fragment on the release runtime classpath"
         id: fragment
         continue-on-error: true
         run: >-
+          bash .github/ci/run_step.sh fragment full
           gradle --no-daemon :app:dependencyInsight
           --dependency androidx.fragment:fragment --configuration releaseRuntimeClasspath
 
@@ -97,55 +118,43 @@ jobs:
         if: steps.release.outcome == 'success'
         continue-on-error: true
         run: >-
+          bash .github/ci/run_step.sh dexscan full
           python3 .github/ci/dex_scan.py "THIS BRANCH (R8 on)"
           app/build/outputs/apk/release/app-release.apk
           app/build/outputs/mapping/release/mapping.txt
 
-      - name: "7. R8 usage.txt / mapping.txt: androidx.activity shims removed?"
+      - name: "7. R8: were the unused androidx.activity shims removed?"
         id: usage
         if: steps.release.outcome == 'success'
         continue-on-error: true
-        run: |
-          D=app/build/outputs/mapping/release
-          ls -l "$D"
-          echo "EdgeToEdgeApi* entries REMOVED (usage.txt):  $(grep -c 'EdgeToEdgeApi' "$D/usage.txt" || true)"
-          echo "EdgeToEdgeApi* entries KEPT    (mapping.txt): $(grep -c 'EdgeToEdgeApi' "$D/mapping.txt" || true)"
-          echo "WindowCompat.enableEdgeToEdge kept in mapping.txt: $(grep -c 'enableEdgeToEdge' "$D/mapping.txt" || true)"
-          ls -l app/build/outputs/apk/release/ app/build/outputs/apk/debug/ || true
+        run: bash .github/ci/run_step.sh usage full bash .github/ci/usage_check.sh
+
+      - name: "8. Full lint (release): Play SDK Index, NewApi, deprecated-API checks"
+        id: lint
+        continue-on-error: true
+        run: bash .github/ci/run_step.sh lint gradle gradle --no-daemon :app:lintRelease
+
+      - name: "8b. Lint findings"
+        if: always()
+        run: python3 .github/ci/digest.py lint app/build/reports/lint-results-release.xml
 
       - name: Result summary
         if: always()
         run: |
-          echo "debug build ............ ${{ steps.debug.outcome }}"
-          echo "unit tests (debug) ..... ${{ steps.unit.outcome }}"
-          echo "qa/release guard test .. ${{ steps.variants.outcome }}"
-          echo "release (R8) build ..... ${{ steps.release.outcome }}"
-          echo "fragment insight ....... ${{ steps.fragment.outcome }}"
-          echo "dex scan ............... ${{ steps.scan.outcome }}"
-          echo "R8 usage check ......... ${{ steps.usage.outcome }}"
+          S="debug=${{ steps.debug.outcome }} unit=${{ steps.unit.outcome }} variants=${{ steps.variants.outcome }} release=${{ steps.release.outcome }} fragment=${{ steps.fragment.outcome }} dexscan=${{ steps.scan.outcome }} usage=${{ steps.usage.outcome }} lint=${{ steps.lint.outcome }}"
+          echo "$S"
+          echo "::notice title=branch outcomes (continue-on-error hides these in the UI)::$S"
           test "${{ steps.debug.outcome }}" = success
           test "${{ steps.unit.outcome }}" = success
           test "${{ steps.variants.outcome }}" = success
           test "${{ steps.release.outcome }}" = success
-
-      - name: Upload reports on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: branch-build-reports
-          path: |
-            app/build/reports/**
-            app/build/test-results/**
-            app/build/outputs/logs/**
-          if-no-files-found: ignore
-          retention-days: 7
 
   baseline:
     name: baseline (before this change, R8 off)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Checkout this branch (for the scan script only)
+      - name: Checkout this branch (for the CI scripts only)
         uses: actions/checkout@v4
         with:
           path: branch
@@ -165,9 +174,68 @@ jobs:
         with:
           gradle-version: "9.7.1"
 
+      - name: Prepare (Gradle heap, SDK licences, throw-away signing keys)
+        run: |
+          mkdir -p ~/.gradle "$LOGS"
+          echo "org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8" >> ~/.gradle/gradle.properties
+          sudo chmod -R a+rwX "$ANDROID_HOME" || true
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          keytool -genkeypair -keystore "$RUNNER_TEMP/ci-verify.jks" -alias upload \
+            -keyalg RSA -keysize 2048 -validity 3650 \
+            -storepass "$STORE_PASSWORD" -keypass "$KEY_PASSWORD" -dname "CN=ci-verify"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/ci-verify.jks" >> "$GITHUB_ENV"
+          keytool -genkeypair -keystore "$GITHUB_WORKSPACE/baseline/debug.keystore" -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: "Baseline release build (R8 off, as shipped in 3.3)"
+        run: bash branch/.github/ci/run_step.sh b_release gradle gradle --no-daemon --stacktrace -p baseline :app:assembleRelease
+
+      - name: "Baseline fragment resolution"
+        continue-on-error: true
+        run: >-
+          bash branch/.github/ci/run_step.sh b_fragment full
+          gradle --no-daemon -p baseline :app:dependencyInsight
+          --dependency androidx.fragment:fragment --configuration releaseRuntimeClasspath
+
+      - name: "DEX scan of the baseline release APK"
+        run: >-
+          bash branch/.github/ci/run_step.sh b_dexscan full
+          python3 branch/.github/ci/dex_scan.py "BASELINE (main before these changes, R8 off)"
+          baseline/app/build/outputs/apk/release/app-release.apk
+
+      - name: "Baseline unit tests (all): which failures pre-date this change?"
+        continue-on-error: true
+        run: bash branch/.github/ci/run_step.sh b_unit gradle gradle --no-daemon -p baseline :app:testDebugUnitTest
+
+      - name: "Baseline JUnit results"
+        if: always()
+        run: python3 branch/.github/ci/digest.py junit "BASELINE debug" baseline/app/build/test-results/testDebugUnitTest
+
+  smoke:
+    name: "smoke (R8 release + demo ads, emulator API ${{ matrix.api }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [35, 36]
+    steps:
+      - name: Checkout this branch
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.7.1"
+
       - name: Prepare (Gradle heap, SDK licences, throw-away signing key)
         run: |
-          mkdir -p ~/.gradle
+          mkdir -p ~/.gradle "$LOGS"
           echo "org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8" >> ~/.gradle/gradle.properties
           sudo chmod -R a+rwX "$ANDROID_HOME" || true
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
@@ -176,16 +244,31 @@ jobs:
             -storepass "$STORE_PASSWORD" -keypass "$KEY_PASSWORD" -dname "CN=ci-verify"
           echo "KEYSTORE_PATH=$RUNNER_TEMP/ci-verify.jks" >> "$GITHUB_ENV"
 
-      - name: "Baseline release build (R8 off, as shipped in 3.3)"
-        run: gradle --no-daemon --stacktrace -p baseline :app:assembleRelease
+      - name: Enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
 
-      - name: "Baseline fragment resolution"
+      - name: "Build the R8 release APK with Google DEMO ad ids (CI must never request live ads)"
+        run: >-
+          bash .github/ci/run_step.sh smoke_build gradle
+          gradle --no-daemon :app:assembleRelease
+          -PADMOB_APP_ID=ca-app-pub-3940256099942544~3347511713
+          -PADMOB_BANNER_UNIT_ID=ca-app-pub-3940256099942544/9214589741
+          -PADMOB_NATIVE_UNIT_ID=ca-app-pub-3940256099942544/2247696110
+
+      - name: Emulator smoke test
+        id: emulator
         continue-on-error: true
-        run: >-
-          gradle --no-daemon -p baseline :app:dependencyInsight
-          --dependency androidx.fragment:fragment --configuration releaseRuntimeClasspath
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          script: bash .github/ci/smoke.sh
 
-      - name: "DEX scan of the baseline release APK"
-        run: >-
-          python3 branch/.github/ci/dex_scan.py "BASELINE (main before these changes, R8 off)"
-          baseline/app/build/outputs/apk/release/app-release.apk
+      - name: Smoke digest
+        if: always()
+        run: python3 .github/ci/digest.py smoke "API ${{ matrix.api }}" "$LOGS/smoke"

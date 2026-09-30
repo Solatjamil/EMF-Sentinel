@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# TEMPORARY (removed with the workflow): did R8 remove the unused androidx.activity EdgeToEdgeApi*
+# shims - the code Play Console's "deprecated edge-to-edge API" scanner flags?
+D=app/build/outputs/mapping/release
+count() { grep -c "$1" "$2" 2>/dev/null || true; }
+
+ls -l "$D"
+echo "EdgeToEdgeApi* lines in usage.txt   (= REMOVED by R8): $(count EdgeToEdgeApi "$D/usage.txt")"
+echo "EdgeToEdgeApi* lines in mapping.txt (= KEPT in the APK): $(count EdgeToEdgeApi "$D/mapping.txt")"
+echo
+echo "--- androidx.activity.EdgeToEdge* classes REMOVED (usage.txt, class lines only)"
+grep -E '^androidx\.activity\.EdgeToEdge[A-Za-z0-9_$]*$' "$D/usage.txt" 2>/dev/null | sort -u | head -30
+echo "--- androidx.activity.EdgeToEdge* classes KEPT (mapping.txt)"
+grep -E '^androidx\.activity\.EdgeToEdge[A-Za-z0-9_$]* -> ' "$D/mapping.txt" 2>/dev/null | head -30
+echo
+echo "--- enableEdgeToEdge mentions in mapping.txt: $(count enableEdgeToEdge "$D/mapping.txt")"
+echo "--- this app's helper classes kept by R8:"
+grep -E '^com\.example\.(ui\.EdgeToEdgeKt|ads\.NativeAdCard)' "$D/mapping.txt" 2>/dev/null | head -10
+echo
+ls -l app/build/outputs/apk/release/
