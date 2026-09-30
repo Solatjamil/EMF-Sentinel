@@ -12,7 +12,6 @@ import android.net.wifi.ScanResult
 import android.Manifest
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
@@ -64,6 +63,12 @@ import kotlinx.coroutines.delay
 import com.example.ads.AdConsentManager
 import com.example.ads.AnchoredAdaptiveBanner
 import com.example.ads.MobileAdsController
+import com.example.ads.NativeAdCard
+import com.example.ui.SystemBarIconsEffect
+import com.example.ui.enableEdgeToEdgeCompat
+import com.example.ui.navigationBarBackdropColor
+import com.example.ui.systemBarsAndCutoutInsets
+import com.example.ui.topBarWindowInsets
 import com.example.sensors.EmfSensorManager
 import com.example.net.LanDevice
 import com.example.net.NetworkScanner
@@ -90,11 +95,19 @@ enum class Sensitivity {
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Edge-to-edge is set up BEFORE super.onCreate() so the first frame is already laid
+        // out edge-to-edge (Android 15+ enforces it anyway for targetSdk 35+).
+        // We deliberately do NOT call androidx.activity's enableEdgeToEdge(): its internal
+        // EdgeToEdgeApi23..35 shims use Window.setStatusBarColor/setNavigationBarColor and
+        // SHORT_EDGES, which Android 15 deprecated and Play Console flags. See ui/EdgeToEdge.kt.
+        enableEdgeToEdgeCompat()
         super.onCreate(savedInstanceState)
-        
-        enableEdgeToEdge()
+
         setContent {
             var isDarkMode by remember { mutableStateOf(true) }
+            // Status/navigation-bar icon contrast follows the in-app theme toggle (which is
+            // independent of the system night mode).
+            SystemBarIconsEffect(darkTheme = isDarkMode)
 
             // ── Ads pipeline: UMP consent gate → guarded one-time SDK init ──
             // No ads are initialized or requested while canRequestAds() is false.
@@ -365,6 +378,8 @@ fun SplashScreen(onTimeout: () -> Unit) {
             letterSpacing = 1.sp,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
+                // Edge-to-edge: lift the watermark above the navigation bar / gesture area.
+                .windowInsetsPadding(systemBarsAndCutoutInsets().only(WindowInsetsSides.Bottom))
                 .padding(bottom = 32.dp)
         )
     }
@@ -685,9 +700,16 @@ fun EMFSentinelApp(
         }
     }
 
+    // Status bars + navigation bars + display cutout. Edge-to-edge means nothing interactive
+    // may sit under any of them (landscape notch, side-mounted 3-button nav bar, gesture bar).
+    val barsAndCutout = systemBarsAndCutoutInsets()
+
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         containerColor = if (isDarkMode) SpaceBlack else LightCanvas,
+        // The top/bottom bars below apply their own vertical insets, so the Scaffold body only
+        // receives the start/end ones (with cutout-awareness, which the default lacks).
+        contentWindowInsets = barsAndCutout,
         topBar = {
             HeaderSection(
                 version = "v${BuildConfig.VERSION_NAME}",
@@ -697,10 +719,14 @@ fun EMFSentinelApp(
             )
         },
         bottomBar = {
+            val themeBackground = if (isDarkMode) SpaceBlack else LightCanvas
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(if (isDarkMode) SpaceBlack else LightCanvas)
+                    .background(themeBackground)
+                    // Keep the nav bar + banner clear of a side nav bar / landscape cutout
+                    // (the background above still paints edge to edge).
+                    .windowInsetsPadding(barsAndCutout.only(WindowInsetsSides.Horizontal))
             ) {
                 // 1. Floating Bottom Navigation Bar
                 BottomNavigationBar(
@@ -719,10 +745,12 @@ fun EMFSentinelApp(
                     canRequestAds = canRequestAds,
                     isDarkMode = isDarkMode
                 )
-                // 3. Android System Gesture / Navigation Inset Spacer
+                // 3. Android System Gesture / Navigation Inset Spacer. The app paints its own
+                // opaque background under the (transparent) navigation bar.
                 Spacer(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .background(navigationBarBackdropColor(isDarkMode, themeBackground))
                         .navigationBarsPadding()
                 )
             }
@@ -782,14 +810,28 @@ fun EMFSentinelApp(
                     )
                     Tab.INSIGHTS -> InsightsScreen(
                         history = sessionHistory,
-                        currentEmf = currentEmfReading
+                        currentEmf = currentEmfReading,
+                        adSlot = {
+                            NativeAdCard(
+                                adUnitId = BuildConfig.ADMOB_NATIVE_UNIT_ID,
+                                canRequestAds = canRequestAds,
+                                isDarkMode = isDarkMode
+                            )
+                        }
                     )
                     Tab.HEALTH -> HealthScreen(
                         currentEmf = currentEmfReading,
                         isShieldActive = isBubbleShieldActive,
                         onShieldToggle = { isBubbleShieldActive = it },
                         emfIsSimulated = emfIsSimulated,
-                        historyAverage = if (sessionHistory.isNotEmpty()) sessionHistory.average().toFloat() else 42.8f
+                        historyAverage = if (sessionHistory.isNotEmpty()) sessionHistory.average().toFloat() else 42.8f,
+                        adSlot = {
+                            NativeAdCard(
+                                adUnitId = BuildConfig.ADMOB_NATIVE_UNIT_ID,
+                                canRequestAds = canRequestAds,
+                                isDarkMode = isDarkMode
+                            )
+                        }
                     )
                 }
             }
@@ -862,7 +904,9 @@ fun HeaderSection(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .statusBarsPadding()
+            // Status bar at the top, plus the display cutout / side bars horizontally
+            // (landscape notch would otherwise cover the logo or the buttons).
+            .windowInsetsPadding(topBarWindowInsets())
             .padding(horizontal = 20.dp, vertical = 12.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
@@ -3865,7 +3909,10 @@ fun ARViewScreen(
 @Composable
 fun InsightsScreen(
     history: List<Float>,
-    currentEmf: Float
+    currentEmf: Float,
+    // Optional sponsored slot (AdMob native ad). Emits nothing while there is no ad, so the
+    // screen is unchanged when ads are off / not consented / failed to load.
+    adSlot: @Composable () -> Unit = {}
 ) {
     val scrollState = rememberScrollState()
 
@@ -3995,6 +4042,9 @@ fun InsightsScreen(
             }
         }
 
+        // Native ad: between two read-only cards, far from any tap target (AdMob placement policy)
+        adSlot()
+
         // Diagnostic signal sources list Bento panel
         Card(
             colors = CardDefaults.cardColors(containerColor = Zinc900.copy(alpha = 0.4f)),
@@ -4068,7 +4118,9 @@ fun HealthScreen(
     isShieldActive: Boolean,
     onShieldToggle: (Boolean) -> Unit,
     emfIsSimulated: Boolean = false,
-    historyAverage: Float = 42.8f
+    historyAverage: Float = 42.8f,
+    // Optional sponsored slot (AdMob native ad); emits nothing while there is no ad.
+    adSlot: @Composable () -> Unit = {}
 ) {
     val scrollState = rememberScrollState()
 
@@ -4226,6 +4278,9 @@ fun HealthScreen(
                 ExposureIndicatorItem("ICNIRP Public Max Limit", "100.0 µT", "Absolute continuous ceiling")
             }
         }
+
+        // Native ad: between two read-only cards (no switches/buttons adjacent)
+        adSlot()
 
         // Actionable health advices
         Card(

@@ -1,5 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.MyApplication" parent="android:Theme.DeviceDefault.NoActionBar" />
+    <!--
+        Edge-to-edge: the window draws behind the system bars and Compose applies the insets
+        (see MainActivity and ui/EdgeToEdge.kt).
+
+        Android 15+ (targetSdk 35+) ignores these two colour attributes and always draws
+        transparent bars. They stay in XML so Android 7-14 gets the same transparent bars
+        WITHOUT calling the deprecated Window.setStatusBarColor()/setNavigationBarColor() from
+        code, which Play Console flags ("uses deprecated APIs or parameters for edge-to-edge").
+    -->
+    <style name="Theme.MyApplication" parent="android:Theme.DeviceDefault.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
 </resources>

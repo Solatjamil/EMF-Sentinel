@@ -12,8 +12,10 @@ android {
     applicationId = "com.goshbuzz.emfsentinel"
     minSdk = 24
     targetSdk = 36
-    versionCode = 3
-    versionName = "3.0"
+    // Play Console already holds release "3.3 (6)", so the next upload needs a higher
+    // versionCode (Play rejects duplicates/lower codes). Keep both in step when releasing.
+    versionCode = 7
+    versionName = "3.4"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -37,7 +39,14 @@ android {
   buildTypes {
     release {
       isCrunchPngs = false
-      isMinifyEnabled = false
+      // R8 shrinking is ON for release. Besides the size/obfuscation benefits Play recommends,
+      // it is what removes the UNUSED androidx.activity EdgeToEdgeApi23..35 shims (and other
+      // unreferenced library code) that still call the Android 15-deprecated
+      // Window.setStatusBarColor / setNavigationBarColor / SHORT_EDGES APIs. Play Console's
+      // "deprecated edge-to-edge APIs" scanner flags those bytes even though this app never
+      // calls them. See docs/IMPLEMENTATION_NOTES.md §F and app/proguard-rules.pro.
+      isMinifyEnabled = true
+      isShrinkResources = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
       signingConfig = signingConfigs.getByName("release")
 
@@ -48,8 +57,14 @@ android {
         ?: "ca-app-pub-4067724379997931~6208950543"
       val prodBannerUnit = (project.findProperty("ADMOB_BANNER_UNIT_ID") as? String)
         ?: "ca-app-pub-4067724379997931/4082502150"
+      // Native advanced unit created for this app. A brand-new AdMob ad unit can take up to
+      // ~1 hour before it starts serving (requests return "no fill" until then) - that is
+      // expected, not a bug. Never click live ads on your own device; use debug/qa builds.
+      val prodNativeUnit = (project.findProperty("ADMOB_NATIVE_UNIT_ID") as? String)
+        ?: "ca-app-pub-4067724379997931/9411043977"
       buildConfigField("String", "ADMOB_APP_ID", "\"$prodAppId\"")
       buildConfigField("String", "ADMOB_BANNER_UNIT_ID", "\"$prodBannerUnit\"")
+      buildConfigField("String", "ADMOB_NATIVE_UNIT_ID", "\"$prodNativeUnit\"")
       manifestPlaceholders["ADMOB_APPLICATION_ID"] = prodAppId
     }
     debug {
@@ -58,14 +73,17 @@ android {
       // Google TEST inventory only — never serve live ads in development builds.
       buildConfigField("String", "ADMOB_APP_ID", "\"ca-app-pub-3940256099942544~3347511713\"")
       buildConfigField("String", "ADMOB_BANNER_UNIT_ID", "\"ca-app-pub-3940256099942544/9214589741\"")
+      // Google demo "Native" unit (https://developers.google.com/admob/android/test-ads).
+      buildConfigField("String", "ADMOB_NATIVE_UNIT_ID", "\"ca-app-pub-3940256099942544/2247696110\"")
       manifestPlaceholders["ADMOB_APPLICATION_ID"] = "ca-app-pub-3940256099942544~3347511713"
     }
     create("qa") {
       initWith(getByName("debug"))
       // QA: your REAL AdMob App ID (so your own Privacy & messaging / UMP configuration
-      // is exercised) combined with Google's TEST banner unit (no live impressions).
+      // is exercised) combined with Google's TEST banner + native units (no live impressions).
       buildConfigField("String", "ADMOB_APP_ID", "\"ca-app-pub-4067724379997931~6208950543\"")
       buildConfigField("String", "ADMOB_BANNER_UNIT_ID", "\"ca-app-pub-3940256099942544/9214589741\"")
+      buildConfigField("String", "ADMOB_NATIVE_UNIT_ID", "\"ca-app-pub-3940256099942544/2247696110\"")
       manifestPlaceholders["ADMOB_APPLICATION_ID"] = "ca-app-pub-4067724379997931~6208950543"
     }
   }
@@ -110,6 +128,9 @@ dependencies {
   // implementation(libs.play.services.location)
   implementation(libs.play.services.ads)
   implementation(libs.ump.user.messaging.platform)
+  // Forces androidx.fragment above the 1.1.0 that play-services-basement and camera-view pull
+  // in transitively (Play Console "outdated SDK" warning). See gradle/libs.versions.toml.
+  implementation(libs.androidx.fragment)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)

@@ -1,21 +1,18 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
+# R8 / ProGuard rules for the RELEASE build (isMinifyEnabled = true, isShrinkResources = true).
 #
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Active rules are intentionally minimal:
+#
+#  * Google Mobile Ads SDK (Legacy), UMP, CameraX, AndroidX/Compose and kotlinx.coroutines all
+#    ship their own consumer rules inside their AARs, so no -keep rules are needed for them.
+#  * The app itself uses NO reflection, JNI, WebView JS interfaces or serialization libraries
+#    (floor plans are persisted with the platform's org.json), so nothing has to be kept by name.
+#
+# If a future dependency logs "Missing class ..." during minifyReleaseWithR8, add a
+# -dontwarn line for exactly the class it names rather than disabling R8 (see
+# docs/IMPLEMENTATION_NOTES.md §F for why R8 must stay on for Play's edge-to-edge check).
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
-
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
-
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Keep file names + line numbers so Play Console / Android vitals crash traces stay readable
+# once they are de-obfuscated with the mapping file that the App Bundle carries.
+-keepattributes SourceFile,LineNumberTable
+# ...but hide the original source file name in shipped stack traces.
+-renamesourcefileattribute SourceFile
