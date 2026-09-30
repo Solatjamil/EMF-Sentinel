@@ -42,7 +42,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -85,25 +85,29 @@ jobs:
         if: always()
         run: python3 .github/ci/digest.py junit "debug" app/build/test-results/testDebugUnitTest
 
-      - name: "3. AdUnitConfigTest on the qa + release variants (also compiles both)"
+      - name: "3. BuildConfig per variant: which ad ids does each build carry? (+ guard test on release)"
         id: variants
         continue-on-error: true
-        run: >-
-          bash .github/ci/run_step.sh variants gradle
-          gradle --no-daemon --continue
-          :app:testQaUnitTest --tests com.example.AdUnitConfigTest
-          :app:testReleaseUnitTest --tests com.example.AdUnitConfigTest
+        run: bash .github/ci/run_step.sh variants full bash .github/ci/variants_check.sh
 
-      - name: "3b. JUnit results (qa + release)"
+      - name: "3b. JUnit results (release guard test)"
         if: always()
-        run: >-
-          python3 .github/ci/digest.py junit "qa+release"
-          app/build/test-results/testQaUnitTest app/build/test-results/testReleaseUnitTest
+        run: python3 .github/ci/digest.py junit "release" app/build/test-results/testReleaseUnitTest
 
       - name: "4. Release build with R8 + resource shrinking (incl. lint-vital)"
         id: release
         continue-on-error: true
         run: bash .github/ci/run_step.sh release gradle gradle --no-daemon --stacktrace :app:assembleRelease
+
+      - name: "4b. Release APK facts (version, SDK levels, AdMob app id in the packaged manifest)"
+        if: steps.release.outcome == 'success'
+        continue-on-error: true
+        run: bash .github/ci/run_step.sh apkfacts full bash .github/ci/apk_facts.sh
+
+      - name: "4c. App bundle (what Play receives): builds, and embeds the R8 mapping?"
+        if: steps.release.outcome == 'success'
+        continue-on-error: true
+        run: bash .github/ci/run_step.sh bundle full bash .github/ci/bundle_check.sh
 
       - name: "5. Resolved androidx.fragment on the release runtime classpath"
         id: fragment
@@ -168,7 +172,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -227,7 +231,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -243,6 +247,9 @@ jobs:
             -keyalg RSA -keysize 2048 -validity 3650 \
             -storepass "$STORE_PASSWORD" -keypass "$KEY_PASSWORD" -dname "CN=ci-verify"
           echo "KEYSTORE_PATH=$RUNNER_TEMP/ci-verify.jks" >> "$GITHUB_ENV"
+          keytool -genkeypair -keystore "$GITHUB_WORKSPACE/debug.keystore" -alias androiddebugkey \
+            -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US"
 
       - name: Enable KVM for the emulator
         run: |
@@ -258,6 +265,9 @@ jobs:
           -PADMOB_BANNER_UNIT_ID=ca-app-pub-3940256099942544/9214589741
           -PADMOB_NATIVE_UNIT_ID=ca-app-pub-3940256099942544/2247696110
 
+      - name: "Build the plain (no R8) debug APK to tell R8 effects from everything else"
+        run: bash .github/ci/run_step.sh smoke_build_debug gradle gradle --no-daemon :app:assembleDebug
+
       - name: Emulator smoke test
         id: emulator
         continue-on-error: true
@@ -269,6 +279,10 @@ jobs:
           profile: pixel_6
           script: bash .github/ci/smoke.sh
 
-      - name: Smoke digest
+      - name: "Smoke digest: R8 release build"
         if: always()
-        run: python3 .github/ci/digest.py smoke "API ${{ matrix.api }}" "$LOGS/smoke"
+        run: python3 .github/ci/digest.py smoke "API ${{ matrix.api }} release(R8)" "$LOGS/smoke/release"
+
+      - name: "Smoke digest: plain debug build"
+        if: always()
+        run: python3 .github/ci/digest.py smoke "API ${{ matrix.api }} debug" "$LOGS/smoke/debug"

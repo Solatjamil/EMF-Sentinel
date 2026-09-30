@@ -190,6 +190,17 @@ def lint(xml_path):
             where = "%s:%s" % (os.path.basename(loc.get("file") or "?"), loc.get("line") or "?")
         lines.append("%s [%s] %s -- %s" % (i.get("id"), i.get("severity"), where,
                                            (i.get("message") or "").replace("\n", " ")[:420]))
+    mine = ("NativeAdCard.kt", "EdgeToEdge.kt", "AdUnitConfigTest.kt", "themes.xml", "proguard-rules.pro")
+    own = []
+    for i in issues:
+        for loc in i.findall("location"):
+            base = os.path.basename(loc.get("file") or "")
+            if base in mine:
+                own.append("%s [%s] %s:%s -- %s" % (i.get("id"), i.get("severity"), base, loc.get("line") or "?",
+                                                    (i.get("message") or "").replace("\n", " ")[:300]))
+                break
+    emit("warning" if own else "notice", "lint: findings INSIDE the files added/changed by this work (%d)" % len(own),
+         "\n".join(own) or "none")
     if lines:
         emit("warning", "lint: findings relevant to this change (%d)" % len(lines), "\n".join(lines[:60]))
     else:
@@ -198,28 +209,42 @@ def lint(xml_path):
 
 
 def smoke(title, out):
+    """One emulator case (release or debug). Sections are merged into few annotations because
+    GitHub keeps at most 10 annotations per level and step."""
     def rd(name):
-        return read(os.path.join(out, name)) if os.path.exists(os.path.join(out, name)) else ""
+        path = os.path.join(out, name)
+        return read(path) if os.path.exists(path) else ""
 
-    env = rd("env.txt")
-    emit("notice", "%s: device + launch" % title,
-         env + "\n" + rd("install.txt").strip() + "\n" + rd("launch.txt").strip())
+    env = rd("env.txt").strip()
+    exit_info = [l.rstrip() for l in rd("exit_info.txt").splitlines() if l.strip()]
+    events = [l.strip() for l in rd("events.txt").splitlines() if l.strip()]
+    summary = env
+    summary += "\n\n-- install: " + " ".join(rd("install.txt").split())[:160]
+    summary += "\n-- launch: " + " ".join(rd("launch.txt").split())[:200]
+    summary += "\n\n-- ApplicationExitInfo (dumpsys activity exit-info):\n" + "\n".join(exit_info[:26])
+    summary += "\n\n-- events buffer, lines about the app:\n" + "\n".join(events[:24])
+    emit("notice", "%s: device, launch, process lifetime, exit reasons" % title, summary)
 
+    # real crash evidence only: the dedicated crash buffer + error-level AndroidRuntime/ANR lines
+    crash = [l for l in rd("crash.txt").splitlines() if l.strip()]
     logcat = rd("logcat.txt").splitlines()
-    crash_pat = re.compile(r"FATAL EXCEPTION|AndroidRuntime: |ANR in |Process com\.goshbuzz\.emfsentinel .*has died|"
-                           r"Fatal signal|am_crash|am_anr")
-    crash_idx = [i for i, l in enumerate(logcat) if crash_pat.search(l)]
-    if crash_idx:
-        blocks = []
-        for i in crash_idx[:3]:
-            blocks.append("\n".join(logcat[max(0, i - 2): i + 18]))
-        emit("error", "%s: CRASH / ANR in logcat (%d hit(s))" % (title, len(crash_idx)), "\n\n".join(blocks))
+    real = re.compile(r"FATAL EXCEPTION|E AndroidRuntime|has died|Force finishing activity com\.goshbuzz|"
+                      r"ANR in com\.goshbuzz|Fatal signal|Process: com\.goshbuzz")
+    main_hits = [i for i, l in enumerate(logcat) if real.search(l) and "goshbuzz" in " ".join(logcat[max(0, i - 3): i + 4])]
+    crash_body = [l for l in crash if not l.startswith("---------")]
+    if crash_body or main_hits:
+        text = "CRASH BUFFER (%d lines):\n%s" % (len(crash_body), "\n".join(crash_body[:70]))
+        if main_hits:
+            i = main_hits[0]
+            text += "\n\nMAIN LOG around the first hit:\n" + "\n".join(logcat[max(0, i - 4): i + 22])
+        emit("error", "%s: CRASH evidence" % title, text)
     else:
-        emit("notice", "%s: no crash / ANR / fatal signal in logcat (%d lines)" % (title, len(logcat)), "clean")
+        emit("notice", "%s: crash buffer is empty and no fatal/ANR line for the app in the main log (%d lines)" % (title, len(logcat)), "clean")
 
     ads_pat = re.compile(r"NativeAdCard|AnchoredAdaptiveBanner|AdConsentManager|MobileAdsController|"
                          r"\bAds\b|GoogleMobileAds|UserMessagingPlatform|AdLoader")
-    ads = [re.sub(r"^\S+\s+\S+\s+\d+\s+\d+\s+", "", l) for l in logcat if ads_pat.search(l)]
+    ads = [re.sub(r"^\S+\s+\S+\s+\d+\s+\d+\s+", "", l) for l in logcat
+           if ads_pat.search(l) and "AndroidRuntime" not in l]
     emit("notice", "%s: ads-related logcat lines (%d)" % (title, len(ads)),
          "\n".join(ads[:70]) or "(none - the ads pipeline logged nothing)")
 
@@ -228,19 +253,26 @@ def smoke(title, out):
         emit("notice", "%s: what the screen showed" % title, ui)
 
     win = rd("dumpsys_window.txt").splitlines()
-    insets = [l.strip() for l in win if re.search(r"type=(statusBars|navigationBars|displayCutout|ITYPE_STATUS_BAR|"
-                                                   r"ITYPE_NAVIGATION_BAR)|mStatusBarHeight|mNavigationBarHeight", l)]
+    insets = [l.strip() for l in win if re.search(r"InsetsSource id=\S+ type=(statusBars|navigationBars|displayCutout)", l)]
     wins = rd("dumpsys_windows.txt").splitlines()
-    appwin = [l.strip() for l in wins if re.search(r"mAttrs=|layoutInDisplayCutoutMode|cutout|Frames: ", l)
-              and ("goshbuzz" in l or "MainActivity" in l or "Frames:" in l or "cutout" in l.lower())]
-    emit("notice", "%s: window-inset facts (dumpsys window)" % title,
-         "INSET SOURCES:\n" + "\n".join(dict.fromkeys(insets))[:1600] +
-         "\n\nAPP WINDOW:\n" + "\n".join(appwin[:14]))
+    block, inside = [], False
+    for l in wins:
+        if re.search(r"Window #\d+ Window\{\w+ u\d+ com\.goshbuzz\.emfsentinel/", l):
+            inside = True
+            block.append(l.strip())
+            continue
+        if inside and re.search(r"^\s*Window #\d+ ", l):
+            break
+        if inside and re.search(r"mAttrs=|Frames:|isReadyForDisplay|mHasSurface|mViewVisibility", l):
+            block.append(l.strip())
+    emit("notice", "%s: window / inset facts" % title,
+         "SYSTEM INSET SOURCES:\n" + "\n".join(dict.fromkeys(insets))[:1500] +
+         "\n\nTHE APP'S OWN WINDOW:\n" + ("\n".join(block[:14]) or "(app window not found in dumpsys window windows)"))
 
     hier = rd("dumpsys_activity_top.txt").splitlines()
     views = [l.strip() for l in hier if re.search(r"NativeAdView|MediaView|AdChoices|nativead|AndroidComposeView", l)]
     emit("notice", "%s: real view classes (dumpsys activity top)" % title,
-         "\n".join(views[:30]) or "(no NativeAdView / MediaView in the hierarchy)")
+         "\n".join(views[:30]) or "(no NativeAdView / MediaView in the top activity's hierarchy)")
 
 
 def main(argv):

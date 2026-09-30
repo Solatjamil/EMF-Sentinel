@@ -115,8 +115,8 @@ def visit(tab, width, height, dpi):
         return
     target = find_label(nodes, tab)
     if target is None:
-        say("bottom-bar item '%s' not found; texts on screen:" % tab)
-        for row in texts(nodes, 25):
+        say("bottom-bar item '%s' not found; packages seen: %s; texts on screen:" % (tab, packages(nodes)))
+        for row in any_texts(nodes, 25):
             say(row)
         return
     tap(target)
@@ -158,6 +158,21 @@ def visit(tab, width, height, dpi):
         fh.write(hier)
 
 
+def packages(nodes):
+    counts = {}
+    for n in nodes:
+        counts[n["pkg"]] = counts.get(n["pkg"], 0) + 1
+    return counts
+
+
+def any_texts(nodes, limit=20):
+    rows = []
+    for n in sorted(nodes, key=lambda n: (n["t"], n["l"])):
+        if label(n):
+            rows.append("    [%s] y=%4d x=%4d  %s" % (n["pkg"].split(".")[-1][:14], n["t"], n["l"], label(n).replace("\n", " | ")[:60]))
+    return rows[:limit]
+
+
 def main():
     width, height = screen_size()
     dpi = density()
@@ -166,6 +181,20 @@ def main():
     if nodes is None:
         say("the first UI dump failed completely; nothing more to report")
         return
+    for attempt in (1, 2):
+        if app_nodes(nodes):
+            break
+        say("attempt %d: no node of %s on screen. packages seen: %s" % (attempt, PKG, packages(nodes)))
+        for row in any_texts(nodes):
+            say(row)
+        # most likely the keyguard / a system dialog is in front: wake, dismiss, bring the app back
+        adb("shell", "input", "keyevent", "KEYCODE_WAKEUP")
+        adb("shell", "wm", "dismiss-keyguard")
+        adb("shell", "input", "keyevent", "82")
+        time.sleep(1)
+        adb("shell", "monkey", "-p", PKG, "-c", "android.intent.category.LAUNCHER", "1")
+        time.sleep(8)
+        nodes = dump("scanner_retry%d" % attempt) or nodes
     rows = texts(nodes, 30)
     say("first screen after launch: %d app nodes, top of the list:" % len(app_nodes(nodes)))
     for row in rows:
