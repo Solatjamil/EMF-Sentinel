@@ -106,6 +106,53 @@ def texts(nodes, limit=45):
     return rows[:limit]
 
 
+def find_tab(nodes, wanted):
+    """The bottom-bar item of a tab. AR Scan is the raised centre button: its clickable ring sits ABOVE its
+    text label, so a tap on the label lands just below the ring and does nothing - use the camera emoji."""
+    mine = app_nodes(nodes)
+    if wanted == "AR Scan":
+        icon = [n for n in mine if "\U0001F4F7" in label(n)]
+        if icon:
+            return max(icon, key=lambda n: n["t"])
+    exact = [n for n in mine if label(n).strip().lower() == wanted.lower()]
+    if exact:
+        return max(exact, key=lambda n: n["t"])
+    return find_label(nodes, wanted)
+
+
+def page_rows(nodes, count=7, below=300):
+    """The first text rows of the page content, below the app header (which every tab shares)."""
+    rows = []
+    for n in sorted(app_nodes(nodes), key=lambda n: (n["t"], n["l"])):
+        if label(n) and n["t"] >= below:
+            rows.append("    y=%4d x=%4d  %s" % (n["t"], n["l"], label(n).replace("\n", " | ")[:60]))
+    return rows[:count]
+
+
+def page_sig(nodes):
+    """What identifies a page: its first two text rows below the shared app header. The ad badge is skipped
+    on purpose - an ad that finishes loading must not look like a navigation."""
+    texts_ = [label(n) for n in sorted(app_nodes(nodes), key=lambda n: (n["t"], n["l"]))
+              if label(n) and n["t"] >= 300 and label(n).strip() != "Ad"]
+    return tuple(texts_[:2])
+
+
+def camera_evidence():
+    """CameraX finds its default config class through a manifest meta-data entry and loads it by name -
+    exactly the kind of thing R8 breaks. Record what the camera stack says after the AR tab opened."""
+    _, out = adb("logcat", "-d", "-v", "brief")
+    rows = [l.strip() for l in out.splitlines()
+            if re.search(r"(?i)camerax|androidx\.camera|camera2cameraimpl|initializationexception|cameraunavailable", l)]
+    say("  camera-related logcat lines: %d" % len(rows))
+    shown = rows if len(rows) <= 12 else rows[:8] + ["..."] + rows[-4:]
+    for l in shown:
+        say("    " + l[:160])
+    _, svc = adb("shell", "dumpsys", "media.camera")
+    keep = [l.strip() for l in svc.splitlines()
+            if re.search(r"(?i)number of camera devices|goshbuzz|Device \d+ maps|Active Camera Clients|^Camera module", l)]
+    say("  camera service (dumpsys media.camera): %s" % ("; ".join(k[:110] for k in keep[:6]) or "no matching lines"))
+
+
 def visit(tab, width, height, dpi):
     say("")
     say("=== tab: %s ===" % tab)
@@ -197,17 +244,29 @@ def exercise(width, height, dpi):
     checkpoint("before exercising")
     for tab in ("Heatmap", "AR Scan", "Scanner"):
         nodes = dump("x_pre_" + tab.lower().replace(" ", "_"))
-        target = find_label(nodes, tab) if nodes else None
+        target = find_tab(nodes, tab) if nodes else None
         if target is None:
             say("  tab '%s' not found on screen" % tab)
             continue
+        before = page_sig(nodes)
         tap(target)
-        time.sleep(6 if tab == "AR Scan" else 3)
+        time.sleep(8 if tab == "AR Scan" else 3)                    # CameraX needs a moment to bind
         after = dump("x_" + tab.lower().replace(" ", "_"))
-        say("  opened %-9s -> %d text nodes on screen" % (tab, len([n for n in app_nodes(after or []) if label(n)])))
-        if tab == "AR Scan" and after:
-            for row in texts(after, 14):
-                say(row)
+        if after is not None and page_sig(after) == before:          # the tap did not navigate: aim above the label
+            say("  (%s: screen unchanged after the first tap, trying again above the label)" % tab)
+            lab = find_label(nodes, tab)
+            if lab is not None:
+                adb("shell", "input", "tap", str((lab["l"] + lab["r"]) // 2), str(lab["t"] - 70))
+                time.sleep(8 if tab == "AR Scan" else 3)
+                after = dump("x_" + tab.lower().replace(" ", "_") + "_retry")
+        rows = page_rows(after or [], 7 if tab == "AR Scan" else 4)
+        changed = after is not None and page_sig(after) != before
+        say("  opened %-9s -> %d text nodes on screen; page content differs from before the tap: %s" % (
+            tab, len([n for n in app_nodes(after or []) if label(n)]), changed))
+        for row in rows:
+            say(row)
+        if tab == "AR Scan":
+            camera_evidence()
         checkpoint("tab " + tab)
     nodes = dump("x_pre_chrome") or []
     gear = [n for n in app_nodes(nodes) if "\u2699" in label(n)]          # the settings gear

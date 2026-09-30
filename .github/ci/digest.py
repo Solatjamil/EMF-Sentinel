@@ -245,8 +245,13 @@ def smoke(title, out):
                          r"\bAds\b|GoogleMobileAds|UserMessagingPlatform|AdLoader")
     ads = [re.sub(r"^\S+\s+\S+\s+\d+\s+\d+\s+", "", l) for l in logcat
            if ads_pat.search(l) and "AndroidRuntime" not in l]
-    emit("notice", "%s: ads-related logcat lines (%d)" % (title, len(ads)),
-         "\n".join(ads[:70]) or "(none - the ads pipeline logged nothing)")
+    # consent-storage chatter and JS bridge noise hide the lines that matter; one chunk keeps the
+    # per-step annotation budget (10) intact now that the UI walk-through report is longer
+    noise = re.compile(r"Stored info not exists|Writing to storage|Action\[|Receive consent action|"
+                       r"jsLoaded GMSG|Refused to get unsafe header")
+    ads = [l for l in ads if not noise.search(l)]
+    emit("notice", "%s: ads-related logcat lines (%d, consent/JS chatter filtered)" % (title, len(ads)),
+         "\n".join(ads[:60]) or "(none - the ads pipeline logged nothing)", max_chunks=1)
 
     ui = rd("ui_findings.txt")
     if ui:
