@@ -2,8 +2,8 @@
 
 Precision RF & bio-telemetry dashboard for Android — real magnetometer EMF metering,
 per-story architect floor-plan mapping, live LAN device discovery, defensive RF
-interference (anti-jam) alerts, IR lens-finder sweep, and consent-gated AdMob
-anchored adaptive banners.
+interference (anti-jam) alerts, IR lens-finder sweep, and consent-gated AdMob ads
+(anchored adaptive banner + native ad).
 
 **No AI, no API keys, fully on-device.** The Google AI Studio scaffolding (Gemini key,
 secrets plugin, Firebase BOM) and the unused Room/Retrofit/OkHttp/Moshi template
@@ -15,7 +15,7 @@ accounts or secrets to run.
 ```bash
 # JDK 17 + Android SDK 36 required; sdk.dir goes in local.properties
 ./gradlew :app:assembleDebug      # Google TEST ads only
-./gradlew :app:assembleQa         # your AdMob App ID + TEST banner (UMP config check)
+./gradlew :app:assembleQa         # your AdMob App ID + TEST banner/native units (UMP config check)
 ./gradlew :app:assembleRelease    # production IDs — confirm in AdMob console first
 ```
 
