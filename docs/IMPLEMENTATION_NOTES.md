@@ -2,6 +2,14 @@
 
 Date: 2026-09-12 · app: `com.goshbuzz.emfsentinel` (EMF Sentinel, GoshBuzz)
 
+**Updated 2026-10-01 — Play Console recommendations for release `3.3 (6)` + AdMob native ad:
+see [§F](#f-play-console-recommendations-for-release-33-6--admob-native-ad).** Those changes were
+compiled, unit-tested, R8-built and smoke-tested on Android 15 and 16 emulators in CI (see the
+verification log at the bottom). **The emulator test found a launch crash in the first R8 build**
+(§F.6); the one-line fix is in this tree and the minified build now launches and runs. Still open: a real
+device, the production ad unit, Play Console's reaction, and one unexplained emulator observation (last
+rows of the log).
+
 ---
 
 ## 🚨 0. URGENT SECURITY ISSUE — ACT NOW
@@ -36,21 +44,24 @@ on the maintained Legacy path is the correct, lowest-risk choice.
 |---|---|---|
 | `com.google.android.gms:play-services-ads` | **25.4.0** | Checked Google's Maven listing today (12 Sep 2026) — latest listed release |
 | `com.google.android.ump:user-messaging-platform` | **4.0.0** | Checked Google's Maven listing today (12 Sep 2026) — latest listed release |
+| `androidx.fragment:fragment` | **1.8.9** (explicit pin) | Google Maven POMs, 30 Sep 2026 — overrides the transitive 1.1.0 Play flags; rationale in §F.1 |
 
 Requirements check: GMA 25.x needs compileSdk ≥ 35 ✅ (36), minSdk ≥ 23 ✅ (24).
 Google Play's target-API release requirement is separate — targetSdk 36 ✅.
 
 **Centralized AdMob IDs per build variant** (`app/build.gradle.kts`):
 
-| Variant | App ID | Banner unit | Purpose |
-|---|---|---|---|
-| `debug` | `ca-app-pub-3940256099942544~3347511713` (Google sample) | `ca-app-pub-3940256099942544/9214589741` (Google TEST adaptive banner) | Development — never live ads |
-| `qa` | your production App ID `ca-app-pub-4067724379997931~6208950543` | Google TEST banner | Validates **your real AdMob Privacy & messaging config** without serving live ads |
-| `release` | your production App ID | **your production banner `ca-app-pub-4067724379997931/4082502150`** | Store builds |
+| Variant | App ID | Banner unit | Native unit | Purpose |
+|---|---|---|---|---|
+| `debug` | `ca-app-pub-3940256099942544~3347511713` (Google sample) | `ca-app-pub-3940256099942544/9214589741` (Google TEST adaptive banner) | `ca-app-pub-3940256099942544/2247696110` (Google demo **Native**) | Development — never live ads |
+| `qa` | your production App ID `ca-app-pub-4067724379997931~6208950543` | Google TEST banner | Google demo Native | Validates **your real AdMob Privacy & messaging config** without serving live ads |
+| `release` | your production App ID | **your production banner `ca-app-pub-4067724379997931/4082502150`** | **your production native unit `ca-app-pub-4067724379997931/9411043977`** | Store builds |
 
 Release IDs default to the values from your brief and are overridable with Gradle
-properties: `./gradlew :app:assembleRelease -PADMOB_APP_ID=... -PADMOB_BANNER_UNIT_ID=...`
-**Confirm both production values against the AdMob console before publishing.**
+properties:
+`./gradlew :app:assembleRelease -PADMOB_APP_ID=... -PADMOB_BANNER_UNIT_ID=... -PADMOB_NATIVE_UNIT_ID=...`
+**Confirm all three production values against the AdMob console before publishing.**
+The demo unit IDs come from <https://developers.google.com/admob/android/test-ads> (checked 30 Sep 2026).
 Note: the app's old hard-coded unit `…/9096937952` was replaced by `…/4082502150` per the
 brief — if both exist in your console, keep one and delete/blocklist the other to avoid
 confusion.
@@ -80,6 +91,15 @@ confusion.
   reserves a **fixed-height slot** below the bottom navigation (no layout jumps on
   load/fail/consent-change), one load per slot (no request loops), `destroy()` on
   dispose, failure never crashes/blocks UI, zero overlay on the creative.
+- `ads/NativeAdCard.kt` — **AdMob Native (advanced)** ad shown **alongside** the banner (the
+  banner is unchanged). A real `NativeAdView` with every asset registered before
+  `setNativeAd()` (headline, body, CTA, icon, advertiser, stars, `MediaView`), a visible
+  **“Ad” badge**, space for the **AdChoices** overlay, `MediaView` ≥ 120 dp / 16:9 / never cropped,
+  video starts muted, no custom click handlers and no clickable background. Same consent
+  gate as the banner; one ad per composition, destroyed on dispose / consent withdrawal /
+  late arrival; failure logs only (logcat tag `NativeAdCard`) and the card then occupies
+  **zero space**. Shown in **Insights** and **Health**, each between two read-only cards
+  (never next to switches, the radar canvas or the tab bar, to avoid accidental clicks).
 - **Settings → “Privacy Options”** row appears whenever UMP reports
   `PrivacyOptionsRequirementStatus.REQUIRED` and opens `showPrivacyOptionsForm()`.
 
@@ -157,15 +177,21 @@ No Gemini/Firebase call existed anywhere in the code; all AI scaffolding has bee
 ## C. Build / run instructions + verification status
 
 ```bash
-# Prereqs: JDK 17, Android SDK platform-36 + build-tools 36, sdk.dir in local.properties
+# Prereqs: JDK 21 (AGP needs 17+, but the Robolectric tests target SDK 36 and refuse to start below 21),
+#          Android SDK platform-36 + build-tools 36, sdk.dir in local.properties
+# The debug build type signs with ./debug.keystore, which is .gitignored, so a fresh clone cannot assemble
+# debug until you create it (pre-existing; left untouched):
+#   keytool -genkeypair -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android \
+#           -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
 ./gradlew :app:assembleDebug      # TEST ads (Google sample IDs)
 ./gradlew :app:assembleQa         # your App ID + TEST banner (validates UMP config)
 ./gradlew :app:assembleRelease    # production IDs — confirm in AdMob console first
 ```
 
 **Verified in this workspace:** see “Build verification log” at the bottom of this file.
-**Not verified here (needs a device/emulator):** actual ad rendering, UMP form display,
-sensor reads, LAN sweep reachability, camera torch.
+**Not verified (needs a real device):** the UMP consent *form* in a GDPR region, sensor reads,
+LAN sweep reachability, camera torch. (Test-ad rendering — banner and native — was later seen on
+emulators; see the log.)
 
 ---
 
@@ -188,6 +214,39 @@ sensor reads, LAN sweep reachability, camera torch.
    SIMULATED badge. IR finder: torch on, red overlay, IR remote-control LED visible as
    bright dot (quick sanity test of the concept).
 7. Jam detector: enable a 2.4 GHz congestor (or toggle router radios) → alert card.
+8. **Native ad** (debug/qa build → Google demo native unit):
+   - **Insights** and **Health**: once loaded, a bordered card appears between the two read-only
+     cards with a yellow **“Ad”** badge (top-left), the **AdChoices** icon (top-right, not
+     covered), app icon + headline, media (image or *muted* video, never cropped), body text and a
+     call-to-action button. The demo creative carries Google's “Test Ad” label.
+   - Tap the CTA / media → the test landing page opens (the SDK handles clicks; the app has no
+     click handler). Tapping empty card background does nothing.
+   - Airplane mode → the card never appears, **no empty gap** is left in the screen and nothing
+     crashes; logcat (`NativeAdCard`) shows one `Native ad failed` line per visit, no retry loop.
+   - Consent denied / withdrawn → no native request is made (and a visible card disappears).
+   - Toggle dark/light, switch tabs quickly, rotate, background/foreground the app: no crash,
+     card colours follow the theme, the banner keeps working underneath.
+   - Scroll **Health** and **Insights** until the card is partly behind the bottom bar, then tap
+     every bottom-bar item: each tap must navigate. (In the CI run on an Android 15 *debug*
+     emulator the taps were swallowed by a stray second window of the app; cause not identified —
+     see the last rows of the verification log.)
+9. **Edge-to-edge** — test on an **Android 15/16** device/emulator *and* on an Android 10–14 one:
+   - Gesture navigation **and** 3-button navigation; portrait **and** landscape; a device or
+     emulator with a **display cutout**.
+   - Nothing interactive sits under the status bar, cutout or navigation bar; header, tab bar
+     and banner respect the side insets in landscape; the splash watermark clears the nav bar.
+   - Status-bar and navigation-bar **icons stay legible** after toggling the in-app dark/light
+     switch (that toggle is independent of the system theme).
+10. **Release build smoke test** (R8 is enabled for the first time in `3.4 (7)`): install the signed
+    release build and walk every tab — Scanner, Heatmap, AR (camera permission + preview), Insights,
+    Health, Settings, Floor-Plan Mapper (draw/save/reload), LAN scan, consent form. Any crash that
+    does not happen in debug points at a missing R8 keep rule (see `app/proguard-rules.pro`). This is not
+    hypothetical: the first R8 build crashed at launch (WorkManager/Room, §F.6) and only the emulator run of
+    the release build showed it. The CI emulator walk (log below) already covered Scanner, Heatmap,
+    Insights, Health, Settings and the theme toggle on API 35 + 36 and the AR tab (CameraX opens the
+    camera) on API 35 with the minified build; what only a person can still judge is the camera
+    permission prompt and live preview, Floor-Plan Mapper (draw/save/reload), LAN scan, and the consent
+    form in a GDPR region.
 
 ---
 
@@ -210,6 +269,163 @@ sensor reads, LAN sweep reachability, camera torch.
       `setTagForUnderAgeOfConsent(false)`.
 - [ ] Test ad shown ≠ live fill guaranteed: new units/apps need activation time;
       monitor AdMob match rate after release.
+- [ ] AdMob: native unit `…/9411043977` belongs to this app and is format **Native advanced**.
+      A brand-new unit can take **up to ~1 hour** before it serves; until then requests return
+      “no fill” (the card simply stays hidden). Test only with debug/qa builds or a registered
+      test device — never click live ads.
+- [ ] Upload **`3.4 (7)`** (Play already has `3.3 (6)`; the repo previously said `3 / 3.0`).
+      Bump `versionCode`/`versionName` in `app/build.gradle.kts` for every further upload.
+- [ ] After upload, open each of the three recommendations (Release dashboard → *Recommendations*)
+      and compare with §F: the **“These start in the following places”** list for the deprecated-API
+      item should no longer name `MainActivity` / `androidx.activity.EdgeToEdgeApi*`. If it only
+      names `com.google.android.gms.ads.*` it is the ads SDK (see §F.3) — not fixable in this repo.
+
+---
+
+## F. Play Console recommendations for release `3.3 (6)` + AdMob native ad
+
+Play Console flagged three items on `3.3 (6)`. Findings, fixes and how to verify each:
+
+### F.1 “Outdated SDK” — `androidx.fragment:fragment` 1.1.0 (Play asks for 1.2.1+)
+
+- **Cause** (read from the Google Maven POMs): the app has no Fragment code. `play-services-basement:18.9.0`
+  (a compile dependency of `play-services-ads`, `play-services-ads-api` **and** UMP) and
+  `androidx.camera:camera-view:1.5.0` (runtime dependency) both declare `fragment:1.1.0`, and
+  nothing else in the graph raises it.
+- **Fix:** explicit `implementation(libs.androidx.fragment)` = **1.8.9** (`gradle/libs.versions.toml`).
+  1.8.9 is the newest release whose own requirements (activity 1.8.1, lifecycle 2.6.1, core-ktx
+  1.2.0) are all already exceeded here, so it changes *only* fragment. The latest stable, 1.9.1,
+  would additionally raise lifecycle to 2.10.0 (+ tracing 2.0.0) in an app pinned to Compose BOM
+  2024.09 — a larger, untested jump for no benefit to this warning.
+- **Verified (CI, `dependencyInsight` on `releaseRuntimeClasspath`):** before, `androidx.fragment:fragment:1.1.0`
+  (dependents: `appcompat:1.1.0` ← `camera-view:1.5.0`, and `play-services-basement:18.9.0`); now
+  `androidx.fragment:fragment:1.8.9` ("by conflict resolution between 1.8.9, 1.1.0 and 1.0.0").
+
+### F.2 “Edge-to-edge may not display for all users”
+
+With `targetSdk 36` the app is edge-to-edge on Android 15+ whether it opts in or not, so every
+screen has to handle insets. Gaps found and closed (`MainActivity.kt`, `ui/EdgeToEdge.kt`,
+`res/values/themes.xml`):
+
+- Edge-to-edge was enabled *after* `super.onCreate()` → now before it, via `enableEdgeToEdgeCompat()`.
+- The default `enableEdgeToEdge()` picks status/navigation **icon** colours from the *system* theme,
+  but this app's dark/light switch is independent → `SystemBarIconsEffect` follows the in-app theme.
+- Only the top (header) and bottom (spacer) insets were applied; left/right insets and the **display
+  cutout** were ignored (landscape notch / side navigation bar could cover the logo, buttons, tab bar
+  and banner) → header, bottom bar and Scaffold body now use status + navigation bars + cutout.
+- The splash watermark was a fixed 32 dp from the bottom → hidden behind a 3-button bar; now inset-aware.
+- Transparent bars for Android 7–14 come from the theme; below API 26 (no dark nav-bar icons) the light
+  theme paints a dark strip behind the navigation bar so the buttons stay visible.
+- **Not changed:** dialogs keep Compose's default (`decorFitsSystemWindows = true`, content stays inside the
+  system bars); the AR camera preview stays inside the Scaffold padding.
+- **Caveat:** Play's detector for this item is opaque. The previous build *already called*
+  `enableEdgeToEdge()` and was still flagged (as are many apps that do), so this list fixes every real inset
+  problem found by reading the code, but only an upload shows whether Play's heuristic clears. Screens
+  owned by libraries (AdMob's full-screen `AdActivity`, the UMP consent form) are outside this repo's control.
+
+### F.3 “Uses deprecated APIs or parameters for edge-to-edge”
+
+Android 15 deprecated (per <https://developer.android.com/about/versions/15/behavior-changes-15>)
+`Window.setStatusBarColor / getStatusBarColor`, `setNavigationBarColor / getNavigationBarColor`,
+`setNavigationBarDividerColor`, the matching theme attributes, and the cutout modes `SHORT_EDGES` /
+`DEFAULT`. The Play Console text you received did not include the “starts in these places” list, so
+the exact callers could not be read — but the evidence is consistent:
+
+- This repo's **own code and resources contain none of these** (grepped, including `res/` and tests).
+- The well-documented source (public reports from Sep 2026 verified with `dexdump`) is
+  **`androidx.activity`'s `enableEdgeToEdge()`**: its internal `EdgeToEdgeApi23…Api35` shims call the
+  deprecated setters and write `SHORT_EDGES`. Play's static scanner flags them even though the app
+  never calls them itself, and upgrading `androidx.activity` does not remove them.
+  `WindowCompat.enableEdgeToEdge(Window)` (androidx.core — the replacement that the `androidx.activity`
+  1.14 alphas now point `enableEdgeToEdge()` to) is **not** a way out either: its source calls the same
+  `setStatusBarColor/setNavigationBarColor` and `SHORT_EDGES`. Only *not referencing* them (plus R8
+  dropping the unused library copies) removes them from the DEX.
+- **Fix, two parts:**
+  1. `enableEdgeToEdge()` is replaced by `enableEdgeToEdgeCompat()` (`ui/EdgeToEdge.kt`), which uses only
+     non-deprecated calls: `WindowCompat.setDecorFitsSystemWindows(false)`, contrast enforcement off
+     for the navigation bar (API 29+) and `LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS` (API 30+). Transparent
+     bars come from `themes.xml`.
+  2. **R8 is now enabled for release** (`isMinifyEnabled` + `isShrinkResources`). Before, the
+     app shipped *every* library class, so the now-unused `EdgeToEdgeApi*` shims would still have been
+     in the DEX (and flagged). R8 strips them.
+- **Measured in CI** (`dexdump -d` of the final release APK, with R8's `mapping.txt` to name the owners):
+
+  | Flagged reference in the DEX | 3.3 build (R8 off) | this tree (R8 on) |
+  |---|---|---|
+  | `Window.setStatusBarColor` call sites | 4 (`EdgeToEdgeApi23/26/29`, `WindowCompat.enableEdgeToEdge`) | **0** |
+  | `Window.setNavigationBarColor` call sites | 4 (same four) | **0** |
+  | cutout mode `SHORT_EDGES` writes | 4 (`EdgeToEdgeApi28`, `WindowCompat.enableEdgeToEdge`, ads `zzm.zzj`, `HsdpShimActivity.onCreate`) | 1 (ads SDK `zzm.zzj` + `HsdpShimActivity.onCreate`, merged into one R8 outline) |
+  | cutout mode `NEVER` writes | 1 (ads `zzx.zzl`) | 1, value now passed as a parameter (still ads `zzx.zzl`) |
+  | cutout mode `ALWAYS` (the recommended value; not flagged) | 1 (`EdgeToEdgeApi30`) | 1 (this app's `MainActivity`) |
+  | **Play-relevant total** | **13** | **2 — both inside Google's ads SDK** |
+
+  R8 removed all nine `androidx.activity.EdgeToEdge*` classes (they are listed in `usage.txt` and absent
+  from `mapping.txt`); APK size fell from 13.0 MB to 4.5 MB.
+- **Judgement call — theme attributes:** `android:statusBarColor` / `android:navigationBarColor` in
+  `themes.xml` are *themselves* on Android 15's deprecated list (ignored there). They are kept because the
+  alternative is a code call that Play definitely flags, and every Play report examined so far lists code
+  references only. If a future report names them as “parameters”, delete those two `<item>` lines: Android
+  7–14 then shows the platform's default opaque bars (Android 15+ is unaffected — it ignores them anyway).
+- **What remains (outside this repo) — now measured, no longer a guess:** the only flagged-parameter writes
+  left in the DEX are `layoutInDisplayCutoutMode = SHORT_EDGES / NEVER`, and every one of them is in Google's
+  ads stack: `com.google.android.gms.ads.internal.overlay.zzm.zzj` (the full-screen ad activity),
+  `com.google.android.gms.ads.internal.util.zzx.zzl`, and `com.google.android.play.core.hsdp.service.HsdpShimActivity.onCreate`
+  (declared by the `hsdp` library that `play-services-ads` brings in). Nothing from this app or from AndroidX is
+  left. If Play's new “These start in the following places” list names only `com.google.android.gms.ads.*` /
+  `com.google.android.play…`, that is the ads SDK: it cannot be fixed here and is not a reason to hold the
+  release. `play-services-ads` 25.5.0 (17 Sep 2026) has an identical dependency set and its notes mention no
+  edge-to-edge change, so the SDK was deliberately **not** bumped.
+
+### F.4 AdMob Native ad — policy mapping
+
+Follows <https://developers.google.com/admob/android/native/advanced> (Legacy GMA SDK — the two SDK
+families are never mixed) and the native-advanced policy <https://support.google.com/admob/answer/6329638>:
+
+| Requirement | How `ads/NativeAdCard.kt` meets it |
+|---|---|
+| Ad attribution badge (“Ad”, ≥ 15 px) | Always-visible amber “Ad” badge, ≥ 18 dp tall, drawn by the app |
+| AdChoices overlay visible | SDK places it top-right (`ADCHOICES_TOP_RIGHT`); 28 dp reserved, never overlapped |
+| All assets inside the `NativeAdView`, all registered | headline, body, CTA, icon, advertiser, stars, `MediaView` registered before `setNativeAd()` |
+| Video `MediaView` ≥ 120 × 120 dp; no stretching/cropping | min 120 dp, fixed 16:9, `FIT_CENTER`, landscape media requested, video starts muted |
+| Required/recommended fields shown | badge, headline, media, icon (if given), CTA, body, stars, advertiser |
+| No truncation below 25 / 90 / 15 characters | headline 2 lines, body 3 lines, full-width one-line CTA |
+| No custom click handlers; no clickable white space | none registered; card background is not clickable |
+| Distinct from content; nothing overlaps the ad | bordered card + badge; no overlays |
+| Sufficient text contrast | palettes chosen ≥ 4.5:1 in both themes |
+| Not near touch targets | only between read-only cards (Insights, Health) |
+| Consent (UMP) | same `canRequestAds` gate as the banner; nothing requested otherwise |
+| Destroy ads | `NativeAd.destroy()` on dispose, on consent withdrawal and for late arrivals |
+| Test ads in development | debug/qa use Google's demo native unit; only `release` has the live unit |
+
+The banner (`AnchoredAdaptiveBanner`) is untouched and keeps its own slot under the tab bar.
+
+### F.5 Release numbering
+
+Play holds `3.3 (6)`; the repo said `3 / 3.0`, so an upload built from it would be rejected as a lower
+version code. `app/build.gradle.kts` is now **`versionCode 7` / `versionName "3.4"`**.
+
+### F.6 R8 launch crash found by the emulator smoke test — and its fix
+
+Turning R8 on (needed for §F.3) is what exposed this, and **only a run of the release build can expose it**:
+debug builds do not run R8, so unit tests and debug installs stay green.
+
+- **Symptom** (Android 15 and 16 emulators, identical): the release build dies while the process starts, before
+  any activity exists:
+  `RuntimeException: Unable to get provider androidx.startup.InitializationProvider` ←
+  `Failed to create an instance of androidx.work.impl.WorkDatabase` (`WorkManagerInitializer`).
+- **Cause:** `play-services-ads` pulls in WorkManager, WorkManager pulls in Room, and Room creates its generated
+  `WorkDatabase_Impl` by reflection. The `room-runtime` on this classpath only declares
+  `-keep class * extends androidx.room.RoomDatabase` (no members), so under R8 full mode the reflection-only
+  no-arg constructor is removed. The class name survives, hence an `InstantiationException` instead of a
+  `ClassNotFoundException`. Public reports show the same crash in other ads/Firebase apps (for example
+  `BirdoVPN/Mobile-Client#438`, `Oasis-Forge/wasfati#35`).
+- **Fix:** `-keep class * extends androidx.room.RoomDatabase { <init>(); }` in `app/proguard-rules.pro`.
+- **Re-verified:** with the rule, R8's output keeps `androidx.work.impl.WorkDatabase_Impl()` (it is listed in
+  `seeds.txt`), and the same minified build launches on the Android 15 and 16 emulators and survives a walk
+  through the screens — details in the verification log.
+- **Do not skip:** install and launch the minified release build before every upload (checklist D.10). If a
+  further R8 problem ever shows up and cannot be fixed quickly, `isMinifyEnabled = false` restores the 3.3
+  behaviour — the price is that the Play “deprecated edge-to-edge APIs” item will very likely stay.
 
 ---
 
@@ -233,3 +449,43 @@ AGP 9.1.1, offline cached deps):
 Environment notes: the template's `-Xmx4g` daemon default OOM-killed builds on a 2 GB
 box; `gradle.properties` now caps at `-Xmx1280m` and debug skips PNG crunch (matching
 the existing release setting). Full cold-cache QA build ≈ 11 min here; warm builds ≈ 40 s. Post-cleanup warm re-verification: debug 53 s, QA 35 s — all green, APKs ~2.7 MB smaller each. Additionally verified end-to-end: `:app:assembleRelease` signed via env-var keystore (scratch key, 12.4 MB) — release merged manifest carries production App ID; aapt badging: com.goshbuzz.emfsentinel v3.0(3), minSdk 24 / targetSdk 36; `:app:testDebugUnitTest` executes green (JUnit4: 1 test, 0 failures). (Robolectric/roborazzi runtime classes still to run on your workstation.)
+
+### 2026-09-30 / 10-01 — Play recommendations + native ad (§F) — verified on GitHub Actions
+
+Nothing could be compiled in the authoring sandbox (no JDK / Android SDK), so a **temporary** GitHub Actions
+workflow did the building, testing and scanning on a clean Ubuntu runner: JDK 21 (Temurin), Gradle 9.7.1,
+AGP 9.1.1, compileSdk 36.1, throw-away signing keys (never the repository's upload key), emulators
+Android 15 (API 35) and Android 16 (API 36), x86_64. The same checks ran on the pre-change commit
+(`72eed5c`, “baseline”) so that pre-existing problems can be told apart from new ones. The workflow and its
+scripts were removed again in the last commit of this branch (they stay in its history: `git log -- .github`).
+Only annotation text could be read back from that CI, not raw logs or artifacts, so the results below are what
+the digests reported.
+
+| Check | Result |
+|---|---|
+| `:app:assembleDebug` | ✅ (needs `debug.keystore`, see §C — pre-existing) |
+| `:app:testDebugUnitTest` (JDK 21) | ✅ **4/4**: `AdUnitConfigTest` (new), `ExampleUnitTest`, `ExampleRobolectricTest`, `GreetingScreenshotTest`. Baseline: 3/3. With JDK 17 both Robolectric tests fail on baseline *and* branch (“Android SDK 36 requires Java 21”) — a JDK matter, not a regression |
+| Unit tests for `qa` / `release` | n/a — AGP 9 creates only `testDebugUnitTest` here. The per-variant ad IDs were checked on the generated `BuildConfig` instead (next rows) |
+| Generated `BuildConfig` | ✅ debug: Google demo app/banner/native; qa: your App ID + demo banner/native; **release: App ID `ca-app-pub-4067724379997931~6208950543`, banner `…/4082502150`, native `…/9411043977`** (exactly as supplied); all `versionCode 7` / `"3.4"` |
+| `:app:assembleRelease` (R8 + shrinkResources + lint-vital) | ✅ APK 13.0 MB → **4.5 MB**; `aapt2` shows `com.goshbuzz.emfsentinel` 7 / 3.4, minSdk 24, targetSdk 36 and the production AdMob App ID in the packaged manifest |
+| `:app:bundleRelease` | ✅ 8.7 MB; embeds `BUNDLE-METADATA/…/proguard.map` (Play can de-obfuscate crash reports automatically) |
+| `androidx.fragment` | ✅ 1.1.0 → **1.8.9** (§F.1) |
+| DEX scan for Play's deprecated edge-to-edge APIs | ✅ **13 → 2** flagged references, the 2 left are inside Google's ads SDK (§F.3 table) |
+| R8 removed the unused `androidx.activity.EdgeToEdge*` shims | ✅ all 9 classes |
+| Full lint (release) | 1 **pre-existing** error (`CAMERA` permission without `<uses-feature android:name="android.hardware.camera" android:required="false">`, `PermissionImpliesUnsupportedChromeOsHardware`) + 78 warnings, mostly “newer dependency available”. No Play SDK Index (`OutdatedLibrary`/`RiskyLibrary`), `NewApi` or deprecated-API finding. Two style warnings in the new `NativeAdCard.kt` (`ViewConstructor`, `SetTextI18n`) were fixed (suppression + `native_ad_badge` string) |
+| Emulator (Android 15 + 16, Play-Store image), **R8 release** build — launch | first run ❌ **crashed at launch** (WorkManager → Room, §F.6). With the keep rule ✅ on both API levels: one process id from 3 s to the end of the test (checked at 3 / 8 / 18 / 33 s and at the end), crash buffer empty, no exit-info records; `WorkDatabase_Impl()` is a kept seed in R8's output. The APK is the real `release` build type with only the three AdMob id constants replaced by Google's demo ids (Gradle `-P`), so CI never requested live ads |
+| … same build — walk-through | ✅ Scanner, Heatmap, Insights, Health, the Settings dialog and the theme toggle (×2) on API 35 + 36: process alive and no app crash after every step. **AR Scan** (the most reflection-sensitive screen — CameraX loads its default config by class name): ✅ entered on API 35; CameraX initialised, `Camera2CameraImpl` went OPENING → OPENED and the camera service listed the app as the client. Not exercised on API 36 (a system “Pixel Launcher isn't responding” dialog covered the app in the run that tried; the APK is identical on both API levels, so a missing keep rule would have shown on API 35 as well). On API 35 the only crash-buffer entry during that walk came from the test tool's own `uiautomator` process (pid 4538), not from the app (pid 2993) |
+| … same build and the plain **debug** build — ads | ✅ UMP reaches `canRequestAds=true` (also on the US-state path, `privacyOptionsRequired=true`); the banner loads; **the native test ad loads and renders** on Insights and Health (`NativeAdCard: Native ad loaded`): “Ad” badge 24.4 × 17.9 dp, headline, rating, media area 343 × 193 dp (demo *video* unit in the release run, demo *image* unit in debug, where a real `NativeAdView` + `MediaView` are in the activity's view hierarchy). The first run used an emulator image *without* the Play Store, where Google's demo native creative fails with `Incorrect native ad response. Click actions were not properly specified` (error 0); the card correctly rendered nothing then (no gap, no crash), which also exercised the failure path |
+| Edge-to-edge on the emulator (debug build, API 35 + 36) | ✅ the window spans the whole display with `layoutInDisplayCutoutMode=always` (window dump read on API 36); on both, the header starts below the status bar (y = 160 px vs. a 128 px bar) |
+| ⚠ **Open observation** — plain debug build, API 35 only | After visiting Insights and Health, taps on the bottom-bar items did not navigate (seen in two runs). The app then owned a *visible* second window (`ty=APPLICATION`, 840 × 406 px at 52,1903, i.e. over the bar). The same two wrap-content windows exist — invisible, 840 × 0 px — in every other configuration: API 36 debug and both R8 builds navigated normally. **Not identified**: the app's only windows are Compose/Material dialogs that open on user actions; my unverified guess is a WebView window of the ads / consent SDKs. **Not compared with the pre-change app.** Checklist D.8 has a manual step for it |
+| On a real device: the **production** native unit serving (a new unit can take about an hour to start filling), live camera preview, insets on Android 10–16 with gesture vs. 3-button navigation, consent form in a GDPR region, Floor-Plan Mapper and LAN scan in the release build | ⚪ NOT RUN — QA checklist D |
+| Play Console: which warnings clear | ⚪ only visible after uploading `3.4 (7)` |
+
+Run on a workstation **before uploading**:
+
+```bash
+./gradlew :app:assembleDebug :app:testDebugUnitTest        # JDK 21
+./gradlew :app:dependencyInsight --dependency androidx.fragment --configuration releaseRuntimeClasspath   # expect 1.8.9
+./gradlew :app:bundleRelease        # needs KEYSTORE_PATH / STORE_PASSWORD / KEY_PASSWORD
+# then install the signed RELEASE build and launch it (R8!): checklist D.10
+```

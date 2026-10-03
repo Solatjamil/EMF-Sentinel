@@ -30,6 +30,16 @@ roborazzi = "1.59.0"
 playServicesAds = "25.4.0"
 # Verified against Google's Maven repository on 2026-09-12 (latest listed release)
 ump = "4.0.0"
+# Explicit pin for Play Console's "outdated SDK" warning (androidx.fragment:fragment 1.1.0).
+# Nothing in this app uses Fragments directly: play-services-basement (pulled in by
+# play-services-ads, ads-api and UMP) and camera-view both depend on fragment 1.1.0, and
+# nothing else in the graph raises it. Play asks for 1.2.1+.
+# 1.8.9 (final 1.8.x patch) is deliberately chosen over 1.9.1: its POM only needs
+# activity 1.8.1 / lifecycle 2.6.1 / core-ktx 1.2.0, all already exceeded by this project, so
+# this changes fragment and NOTHING else in the dependency graph. 1.9.x would also
+# drag lifecycle up to 2.10.0 (+ tracing 2.0.0) into an app pinned to Compose BOM 2024.09.
+# Verified against Google's Maven repository (POMs) on 2026-09-30.
+fragment = "1.8.9"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -70,6 +80,7 @@ roborazzi-compose = { group = "io.github.takahirom.roborazzi", name = "roborazzi
 roborazzi-junit-rule = { group = "io.github.takahirom.roborazzi", name = "roborazzi-junit-rule", version.ref = "roborazzi" }
 play-services-ads = { group = "com.google.android.gms", name = "play-services-ads", version.ref = "playServicesAds" }
 ump-user-messaging-platform = { group = "com.google.android.ump", name = "user-messaging-platform", version.ref = "ump" }
+androidx-fragment = { group = "androidx.fragment", name = "fragment", version.ref = "fragment" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

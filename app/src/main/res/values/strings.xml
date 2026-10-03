@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">EMF Sentinel</string>
+    <!-- AdMob native-ad policy: a clear "Ad" attribution must be shown on every native ad. -->
+    <string name="native_ad_badge">Ad</string>
 </resources>
